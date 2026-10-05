@@ -12,10 +12,11 @@ From the `desktop` directory:
 npm install
 python -m venv backend/.venv
 backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
-Copy-Item backend/.env.example backend/.env
 ```
 
-Threadline is configured for Azure OpenAI. In `backend/.env`, set your Azure resource API key, endpoint, and API version. Set a deployment name for each Azure model you have deployed. The model catalog in `backend/models.json` maps selectable models to those deployment variables; only deployment settings selected by agents are required for a workflow run.
+Open **Settings** from the gear in the top bar to add Azure model deployments. Set each model's display name, model ID, deployment name, endpoint, optional API version, and API key. Keys are stored in Windows Credential Manager; endpoints and model metadata are stored in `%LOCALAPPDATA%\Threadline\models.json`. Do not share that per-user settings file as a way to share credentials; each person configures their own Azure access.
+
+Existing `backend/.env` settings are imported into Windows Credential Manager and the per-user model settings on first launch. The `.env` file is left untouched so you can remove old credentials after verifying the import.
 
 Start the API and UI in separate terminals:
 

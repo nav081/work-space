@@ -217,6 +217,47 @@
 .runs-empty { min-height: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #91a095; }
 .runs-empty strong { color: #56665a; font: 600 13px 'Manrope', sans-serif; }
 .runs-empty span { margin-bottom: 5px; color: #8c968e; font-size: 10px; }
+.icon-button.active { color: #527c64; background: #edf3ee; }
+.settings-view { flex: 1 0 auto; min-height: 520px; padding: 28px clamp(18px, 3vw, 42px) 36px; background: #f7f8f5; }
+.settings-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; max-width: 1180px; margin: 0 auto 22px; }
+.settings-heading h1 { margin: 6px 0 5px; color: #29332c; font: 700 20px 'Manrope', sans-serif; }
+.settings-heading p { max-width: 650px; margin: 0; color: #7f8a81; font-size: 11px; line-height: 1.6; }
+.settings-secure-badge { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; padding: 8px 10px; color: #527c64; border: 1px solid #dce8dd; border-radius: 4px; background: #f1f6f1; font: 8px var(--mono); letter-spacing: .35px; }
+.settings-layout { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(300px, .8fr); align-items: start; gap: 14px; }
+.saved-models-panel, .model-form-panel { min-width: 0; padding: 17px; border: 1px solid #e5e9e3; border-radius: 6px; background: #fff; }
+.settings-section-heading { min-height: 34px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.settings-section-heading h2 { margin: 4px 0 0; color: #354037; font: 700 13px 'Manrope', sans-serif; }
+.settings-count { min-width: 22px; padding: 4px 6px; color: #78847b; border-radius: 10px; background: #f0f3ef; text-align: center; font: 9px var(--mono); }
+.saved-model-list { display: grid; }
+.saved-model-row { min-width: 0; min-height: 70px; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto auto; align-items: center; gap: 10px; border-top: 1px solid #edf0ec; }
+.saved-model-icon { width: 28px; height: 28px; display: grid; place-items: center; color: #60826a; border-radius: 5px; background: #edf3ee; }
+.saved-model-main { min-width: 0; display: grid; gap: 4px; }
+.saved-model-main strong { overflow: hidden; color: #3b463d; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.saved-model-main > span { overflow: hidden; color: #758178; font: 9px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.saved-model-main > span i { display: inline-block; width: 3px; height: 3px; margin: 0 4px 2px; border-radius: 50%; background: #acb5ac; }
+.saved-model-main small { overflow: hidden; color: #a0a8a1; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.saved-model-status { display: flex; align-items: center; gap: 5px; color: #a0a8a1; font: 8px var(--mono); white-space: nowrap; }
+.model-config-dot { width: 6px; height: 6px; border-radius: 50%; background: #c39c65; }
+.model-config-dot.configured { background: #73a181; }
+.saved-model-actions { display: flex; gap: 2px; }
+.remove-model-button:hover { color: #ad5d53; background: #faf0ee; }
+.settings-empty { min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #91a095; text-align: center; }
+.settings-empty strong { color: #59675d; font: 600 11px 'Manrope', sans-serif; }
+.settings-empty span { color: #8c968e; font-size: 9px; }
+.settings-security-note { display: flex; gap: 9px; margin-top: 14px; padding: 10px; color: #66806b; border-radius: 4px; background: #f1f6f0; }
+.settings-security-note > svg { flex: 0 0 auto; margin-top: 1px; }
+.settings-security-note span { display: grid; gap: 4px; }
+.settings-security-note strong { color: #526c57; font-size: 9px; font-weight: 600; }
+.settings-security-note small { color: #7b8a7e; font-size: 8px; line-height: 1.5; }
+.model-form-panel { display: grid; gap: 11px; }
+.model-form-panel .settings-section-heading { margin-bottom: 0; }
+.settings-field { display: grid; gap: 5px; color: #566157; font-size: 9px; font-weight: 600; }
+.settings-field > span { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.settings-field > span small, .settings-field > small { color: #929b93; font-size: 8px; font-weight: 400; }
+.settings-field .text-input { height: 32px; font-size: 10px; }
+.settings-field input[type='password'] { letter-spacing: .3px; }
+.model-form-actions { display: flex; justify-content: flex-end; gap: 7px; padding-top: 4px; }
+.model-form-actions .run-button { min-width: 112px; }
 .toast { z-index: 20; position: fixed; right: 20px; bottom: 228px; display: flex; align-items: center; gap: 8px; padding: 10px 13px; color: #486650; border: 1px solid #d9e7dc; border-radius: 5px; background: #f4f9f4; box-shadow: 0 4px 14px #25392b12; font-size: 11px; animation: toast-in .18s ease-out; }
 .app-footer { height: 27px; flex: 0 0 27px; justify-content: space-between; padding: 0 23px; color: #9aa29c; background: #f4f5f2; font: 8px var(--mono); letter-spacing: .5px; }
 .footer-separator { padding: 0 4px; color: #c0c7c0; }
@@ -245,6 +286,7 @@
   .path-entry { order: 3; flex-basis: 100%; max-width: none; }
   .project-state { margin-left: auto; }
   .workspace { grid-template-columns: 185px minmax(300px, 1fr); }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .inspector { grid-column: 1 / -1; min-height: 300px; border-top: 1px solid var(--line); border-left: 0; padding: 0 17px 12px; }
   .inspector-title { padding: 12px 0; }
   .inspector .form-section { max-width: none; }
@@ -263,6 +305,14 @@
   .project-title { flex: 1; }
   .project-state { font-size: 8px; }
   .tabbar { padding: 0 13px; }
+  .settings-view { padding: 18px 12px 25px; }
+  .settings-heading { align-items: flex-start; flex-direction: column; gap: 12px; margin-bottom: 14px; }
+  .settings-heading h1 { font-size: 18px; }
+  .saved-models-panel, .model-form-panel { padding: 12px; }
+  .saved-model-row { grid-template-columns: 26px minmax(0, 1fr) auto; gap: 7px; }
+  .saved-model-icon { width: 25px; height: 25px; }
+  .saved-model-status { grid-column: 2; grid-row: 2; margin-top: -13px; }
+  .saved-model-actions { grid-column: 3; grid-row: 1 / span 2; }
   .requirement-bar { align-items: flex-start; gap: 8px; padding: 9px 12px; }
   .requirement-mark { margin-top: 13px; width: 25px; height: 25px; }
   .backend-badge { min-width: 103px; margin-top: 4px; padding: 6px; }

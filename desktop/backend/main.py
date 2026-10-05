@@ -11,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from workflow import MODEL_CATALOG, RunRequest, build_workflow, is_model_deployment_configured, missing_model_settings, resolve_project_path
+from settings_store import ModelSettingsInput, model_settings
+from workflow import RunRequest, build_workflow, missing_model_settings, resolve_project_path
 
 app = FastAPI(title="Threadline Local Agent Service", version="0.1.0")
 app.add_middleware(
@@ -37,10 +38,33 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/models")
 async def models() -> list[dict[str, Any]]:
-    return [
-        {"id": model["id"], "name": model["name"], "provider": model["provider"], "configured": is_model_deployment_configured(model["id"])}
-        for model in MODEL_CATALOG
-    ]
+    return model_settings.list_models()
+
+
+@app.get("/api/settings/models")
+async def settings_models() -> list[dict[str, Any]]:
+    return model_settings.list_models()
+
+
+@app.post("/api/settings/models")
+async def save_model_settings(request: ModelSettingsInput) -> dict[str, Any]:
+    try:
+        return model_settings.save(request)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="Windows Credential Manager could not save this API key.") from error
+
+
+@app.delete("/api/settings/models/{model_id}")
+async def delete_model_settings(model_id: str) -> dict[str, str]:
+    try:
+        model_settings.delete(model_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="Windows Credential Manager could not remove this API key.") from error
+    return {"status": "deleted"}
 
 
 @app.post("/api/projects/validate")
@@ -61,7 +85,7 @@ async def run_workflow(request: RunRequest) -> StreamingResponse:
 
     missing = missing_model_settings(request.agents)
     if missing:
-        raise HTTPException(status_code=400, detail=f"Configure these Azure OpenAI settings in backend/.env: {', '.join(missing)}")
+        raise HTTPException(status_code=400, detail=f"Configure these Azure OpenAI settings in app Settings: {', '.join(missing)}")
 
     async def events() -> AsyncIterator[str]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()

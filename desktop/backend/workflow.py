@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
@@ -14,12 +13,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import StructuredTool
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from langgraph.graph import END, START, StateGraph
-from dotenv.parser import parse_stream
 from pydantic import BaseModel, Field
-
-BACKEND_DIR = Path(__file__).resolve().parent
-MODEL_CATALOG = json.loads((BACKEND_DIR / "models.json").read_text(encoding="utf-8"))
-MODELS_BY_ID = {model["id"]: model for model in MODEL_CATALOG}
+from settings_store import model_settings
 
 
 class AgentConfig(BaseModel):
@@ -178,51 +173,21 @@ def _project_tools(root: Path, enabled: set[str]) -> list[StructuredTool]:
 
 def get_model_config(model_id: str) -> dict[str, str]:
     try:
-        return MODELS_BY_ID[model_id]
-    except KeyError as error:
+        return model_settings.get_model(model_id)
+    except ValueError as error:
         raise ValueError(f"Unknown model '{model_id}'. Refresh the model list and choose a configured model.") from error
 
 
 def get_model_api_key(model_id: str) -> str | None:
-    api_key_env = get_model_config(model_id)["api_key_env"]
-    return get_setting(api_key_env)
-
-
-def get_setting(setting_name: str) -> str | None:
-    allowed_settings = {
-        model[field]
-        for model in MODEL_CATALOG
-        for field in ("api_key_env", "endpoint_env", "api_version_env", "deployment_env")
-        if field in model
-    }
-    if setting_name not in allowed_settings:
-        raise ValueError(f"Unknown model setting '{setting_name}'.")
-    value = os.environ.get(setting_name)
-    if value:
-        return value
-    env_file = BACKEND_DIR / ".env"
-    if not env_file.is_file():
-        return None
-    with env_file.open(encoding="utf-8") as stream:
-        for binding in parse_stream(stream):
-            if binding.key == setting_name:
-                return binding.value
-    return None
+    return model_settings.get_api_key(model_id)
 
 
 def required_provider_keys(agents: list[AgentConfig]) -> set[str]:
-    return {get_model_config(agent.model)["api_key_env"] for agent in agents}
+    return {agent.model for agent in agents}
 
 
 def required_model_settings(agents: list[AgentConfig]) -> set[str]:
-    required = required_provider_keys(agents)
-    for agent in agents:
-        model = get_model_config(agent.model)
-        endpoint = get_setting(model["endpoint_env"])
-        required.update((model["endpoint_env"], model["deployment_env"]))
-        if not _is_foundry_endpoint(endpoint):
-            required.add(model["api_version_env"])
-    return required
+    return required_provider_keys(agents)
 
 
 def _is_foundry_endpoint(endpoint: str | None) -> bool:
@@ -231,16 +196,11 @@ def _is_foundry_endpoint(endpoint: str | None) -> bool:
 
 
 def missing_settings_for_model(model_id: str) -> list[str]:
-    model = get_model_config(model_id)
-    endpoint = get_setting(model["endpoint_env"])
-    required = {model["api_key_env"], model["endpoint_env"], model["deployment_env"]}
-    if not _is_foundry_endpoint(endpoint):
-        required.add(model["api_version_env"])
-    return sorted(setting for setting in required if not get_setting(setting))
+    model_settings.get_model(model_id)
+    return model_settings.missing_settings({model_id})
 
 
 def is_model_deployment_configured(model_id: str) -> bool:
-    model = get_model_config(model_id)
     return not missing_settings_for_model(model_id)
 
 
@@ -250,8 +210,8 @@ def missing_model_settings(agents: list[AgentConfig]) -> list[str]:
 
 
 def create_chat_model(model_config: dict[str, str], api_key: str) -> Any:
-    endpoint = get_setting(model_config["endpoint_env"])
-    deployment = get_setting(model_config["deployment_env"])
+    endpoint = model_config["endpoint"]
+    deployment = model_config["deployment"]
     if _is_foundry_endpoint(endpoint):
         base_url = (endpoint or "").rstrip("/")
         if not base_url.endswith("/openai/v1"):
@@ -260,7 +220,7 @@ def create_chat_model(model_config: dict[str, str], api_key: str) -> Any:
     return AzureChatOpenAI(
         azure_deployment=deployment,
         azure_endpoint=endpoint,
-        api_version=get_setting(model_config["api_version_env"]),
+        api_version=model_config["api_version"],
         api_key=api_key,
         model=model_config["model"],
     )

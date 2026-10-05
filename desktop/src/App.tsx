@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from 'react'
 import {
   addEdge, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider,
   useEdgesState, useNodesState, useReactFlow,
@@ -24,8 +24,11 @@ type AgentData = {
   tools: string[]
   status?: string
 }
-type ModelOption = { id: string; name: string; provider: string; configured: boolean }
+type ModelOption = { id: string; name: string; provider: string; model: string; deployment: string; endpoint: string; api_version: string; api_key_configured: boolean; configured: boolean }
 type ConsoleEntry = { id: number; time: string; agent: string; level: string; message: string }
+type ModelForm = { id?: string; name: string; model: string; deployment: string; endpoint: string; api_version: string; api_key: string }
+
+const emptyModelForm: ModelForm = { name: '', model: '', deployment: '', endpoint: '', api_version: '', api_key: '' }
 
 const presets: Record<AgentKind, Omit<AgentData, 'status'>> = {
   understand: { kind: 'understand', name: 'Requirement analyst', detail: 'Clarifies scope and context', color: 'mint', instruction: 'Read the request and relevant project files. Produce an implementation brief with assumptions, acceptance criteria, and likely affected files or systems.', model: 'azure-gpt-4o', modelLabel: 'Azure GPT-4o', tools: ['Read files', 'Search codebase'] },
@@ -111,6 +114,9 @@ function WorkflowEditor() {
   const [toast, setToast] = useState('')
   const [backendReady, setBackendReady] = useState(false)
   const [models, setModels] = useState<ModelOption[]>([])
+  const [modelForm, setModelForm] = useState<ModelForm>(emptyModelForm)
+  const [editingModelId, setEditingModelId] = useState<string | null>(null)
+  const [savingModel, setSavingModel] = useState(false)
   const { screenToFlowPosition } = useReactFlow()
   const consoleEndRef = useRef<HTMLDivElement>(null)
   const selectedNode = nodes.find((node) => node.id === selectedId)
@@ -125,7 +131,7 @@ function WorkflowEditor() {
 
   useEffect(() => {
     let active = true
-    Promise.all([fetch('/api/health'), fetch('/api/models')]).then(async ([healthResponse, modelsResponse]) => {
+    Promise.all([fetch('/api/health'), fetch('/api/settings/models')]).then(async ([healthResponse, modelsResponse]) => {
       if (!healthResponse.ok || !modelsResponse.ok) throw new Error('Local service unavailable')
       const health = await healthResponse.json()
       const availableModels = await modelsResponse.json() as ModelOption[]
@@ -150,6 +156,45 @@ function WorkflowEditor() {
   }
   const appendConsole = (message: string, agent = 'SYSTEM', level = 'info') => {
     setConsoleEntries((current) => [...current, { id: Date.now() + Math.random(), time: new Date().toLocaleTimeString([], { hour12: false }), agent, level, message }].slice(-250))
+  }
+  const editModel = (model: ModelOption) => {
+    setEditingModelId(model.id)
+    setModelForm({ id: model.id, name: model.name, model: model.model, deployment: model.deployment, endpoint: model.endpoint, api_version: model.api_version, api_key: '' })
+  }
+  const resetModelForm = () => {
+    setEditingModelId(null)
+    setModelForm(emptyModelForm)
+  }
+  const saveModel = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSavingModel(true)
+    try {
+      const response = await fetch('/api/settings/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(modelForm) })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.detail ?? 'Could not save model settings.')
+      setModels((current) => current.some((model) => model.id === result.id) ? current.map((model) => model.id === result.id ? result : model) : [...current, result])
+      resetModelForm()
+      setToast('Model settings saved securely')
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Could not save model settings.')
+    } finally {
+      setSavingModel(false)
+      window.setTimeout(() => setToast(''), 3200)
+    }
+  }
+  const removeModel = async (model: ModelOption) => {
+    if (!window.confirm(`Remove ${model.name} and its saved API key from this computer?`)) return
+    try {
+      const response = await fetch(`/api/settings/models/${encodeURIComponent(model.id)}`, { method: 'DELETE' })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.detail ?? 'Could not remove model settings.')
+      setModels((current) => current.filter((item) => item.id !== model.id))
+      if (editingModelId === model.id) resetModelForm()
+      setToast('Model and saved credential removed')
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Could not remove model settings.')
+    }
+    window.setTimeout(() => setToast(''), 3200)
   }
   const setProject = async () => {
     if (!projectPath.trim()) { setToast('Enter a local project path first'); window.setTimeout(() => setToast(''), 2600); return }
@@ -245,7 +290,7 @@ function WorkflowEditor() {
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><Layers2 size={18} /></span><span>THREADLINE</span><span className="brand-divider" /><span className="workspace-label">WORKSPACE</span></div>
       <div className="topbar-center"><span className="live-dot" /> LOCAL WORKSPACE <ChevronDown size={13} /></div>
-      <div className="topbar-actions"><button className="icon-button" title="Help"><CircleHelp size={17} /></button><button className="icon-button" title="Settings"><Settings2 size={17} /></button><span className="avatar">R</span></div>
+      <div className="topbar-actions"><button className="icon-button" title="Help"><CircleHelp size={17} /></button><button className={`icon-button ${activeTab === 'Settings' ? 'active' : ''}`} title="Settings" aria-label="Settings" onClick={() => setActiveTab(activeTab === 'Settings' ? 'Workflow' : 'Settings')}><Settings2 size={17} /></button><span className="avatar">R</span></div>
     </header>
     <div className="project-strip">
       <div className="project-title"><span className="project-folder"><FileCode2 size={16} /></span><div><span className="eyebrow">PROJECT</span><strong>{projectName}</strong></div></div>
@@ -255,7 +300,25 @@ function WorkflowEditor() {
     <div className="tabbar"><div className="tabs"><button className={activeTab === 'Workflow' ? 'active' : ''} onClick={() => setActiveTab('Workflow')}><GitBranch size={15} /> Workflow</button><button className={activeTab === 'Runs' ? 'active' : ''} onClick={() => setActiveTab('Runs')}><Activity size={15} /> Runs <span className="tab-count">0</span></button></div><div className="workflow-meta"><span><span className="meta-green" /> Draft</span><span className="meta-divider" /><span>{nodes.length} agents</span><button className="icon-button small" title="More workflow options"><MoreHorizontal size={17} /></button></div></div>
     <section className="requirement-bar"><span className="requirement-mark"><FileText size={16} /></span><div className="requirement-input"><span className="eyebrow">BUILD REQUEST</span><textarea aria-label="Describe the functionality to build" placeholder="Describe the functionality you want the agents to implement..." rows={2} value={requirement} onChange={(event) => setRequirement(event.target.value)} /></div><div className={`backend-badge ${backendReady ? 'online' : 'offline'}`}><span className="backend-dot" /><span>{backendReady ? 'AZURE OPENAI' : 'SERVICE OFFLINE'}</span><small>{backendReady ? `${models.filter((model) => model.configured).length} DEPLOYMENT(S) CONFIGURED` : 'START THE LANGGRAPH API'}</small></div></section>
 
-    {activeTab === 'Workflow' ? <main className="workspace">
+    {activeTab === 'Settings' ? <main className="settings-view">
+      <div className="settings-heading"><div><span className="eyebrow">LOCAL CONFIGURATION</span><h1>Models & credentials</h1><p>Model endpoints are stored in your user profile. API keys are saved in Windows Credential Manager and never returned to the app.</p></div><span className="settings-secure-badge"><ShieldCheck size={14} /> WINDOWS CREDENTIAL MANAGER</span></div>
+      <div className="settings-layout">
+        <section className="saved-models-panel"><div className="settings-section-heading"><div><span className="eyebrow">MODEL CATALOG</span><h2>Azure deployments</h2></div><span className="settings-count">{models.length}</span></div>
+          {models.length === 0 ? <div className="settings-empty"><Layers2 size={20} /><strong>No models configured</strong><span>Add an Azure deployment to make it available to agents.</span></div> : <div className="saved-model-list">{models.map((model) => <article className="saved-model-row" key={model.id}><div className="saved-model-icon"><Sparkles size={16} /></div><div className="saved-model-main"><strong>{model.name}</strong><span>{model.model} <i /> {model.deployment || 'Deployment not set'}</span><small title={model.endpoint}>{model.endpoint || 'Endpoint not set'}{model.api_version ? ` · API ${model.api_version}` : ' · v1 API'}</small></div><div className="saved-model-status"><span className={`model-config-dot ${model.configured ? 'configured' : ''}`} /><span>{model.configured ? 'READY' : model.api_key_configured ? 'INCOMPLETE' : 'KEY NEEDED'}</span></div><div className="saved-model-actions"><button className="icon-button small" title={`Edit ${model.name}`} aria-label={`Edit ${model.name}`} onClick={() => editModel(model)}><Settings2 size={15} /></button><button className="icon-button small remove-model-button" title={`Remove ${model.name}`} aria-label={`Remove ${model.name}`} onClick={() => removeModel(model)}><X size={15} /></button></div></article>)}</div>}
+          <div className="settings-security-note"><ShieldCheck size={15} /><span><strong>Credentials stay on this Windows account</strong><small>Only model metadata is written to the Threadline user settings file. Keys are stored in Windows Credential Manager.</small></span></div>
+        </section>
+        <form className="model-form-panel" onSubmit={saveModel}>
+          <div className="settings-section-heading"><div><span className="eyebrow">{editingModelId ? 'EDIT DEPLOYMENT' : 'NEW DEPLOYMENT'}</span><h2>{editingModelId ? 'Model settings' : 'Add Azure model'}</h2></div>{editingModelId && <button type="button" className="icon-button small" title="Cancel editing" aria-label="Cancel editing" onClick={resetModelForm}><X size={16} /></button>}</div>
+          <label className="settings-field"><span>Display name</span><input className="text-input" required maxLength={120} placeholder="Azure GPT-4.1 mini" value={modelForm.name} onChange={(event) => setModelForm((current) => ({ ...current, name: event.target.value }))} /></label>
+          <label className="settings-field"><span>Model ID</span><input className="text-input" required maxLength={120} placeholder="gpt-4.1-mini" value={modelForm.model} onChange={(event) => setModelForm((current) => ({ ...current, model: event.target.value }))} /><small>Azure model family ID, not the deployment name.</small></label>
+          <label className="settings-field"><span>Deployment name</span><input className="text-input" required maxLength={160} placeholder="The exact name from Azure AI Foundry" value={modelForm.deployment} onChange={(event) => setModelForm((current) => ({ ...current, deployment: event.target.value }))} /></label>
+          <label className="settings-field"><span>Azure endpoint</span><input className="text-input" type="url" required placeholder="https://resource.services.ai.azure.com" value={modelForm.endpoint} onChange={(event) => setModelForm((current) => ({ ...current, endpoint: event.target.value }))} /></label>
+          <label className="settings-field"><span>API version <small>Optional for Azure AI Foundry v1</small></span><input className="text-input" placeholder="2024-10-21" value={modelForm.api_version} onChange={(event) => setModelForm((current) => ({ ...current, api_version: event.target.value }))} /></label>
+          <label className="settings-field"><span>Azure API key {editingModelId && <small>Leave blank to keep the saved key</small>}</span><input className="text-input" type="password" autoComplete="new-password" required={!editingModelId} placeholder={editingModelId ? 'Stored securely; enter a new key to rotate it' : 'Paste Azure OpenAI API key'} value={modelForm.api_key} onChange={(event) => setModelForm((current) => ({ ...current, api_key: event.target.value }))} /></label>
+          <div className="model-form-actions"><button className="secondary-button" type="button" onClick={resetModelForm} disabled={!editingModelId && !modelForm.name && !modelForm.model}>Clear</button><button className="run-button" type="submit" disabled={savingModel || !backendReady}><Check size={14} /> {savingModel ? 'Saving securely' : editingModelId ? 'Save changes' : 'Add model'}</button></div>
+        </form>
+      </div>
+    </main> : activeTab === 'Workflow' ? <main className="workspace">
       <aside className="agent-library">
         <div className="panel-heading"><div><span className="eyebrow">BUILD</span><h1>Agent library</h1></div><button className="icon-button small" title="Add custom agent" onClick={() => addAgent('developer')}><Plus size={17} /></button></div>
         <label className="search-field"><Search size={15} /><input placeholder="Find an agent" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
