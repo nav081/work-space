@@ -1,0 +1,8 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+python-dotenv>=1,<2
+langgraph>=0.6,<2
+langchain>=0.3,<2
+langchain-openai>=0.3,<2
+pytest>=8,<9
+httpx>=0.28,<1

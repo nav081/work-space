@@ -1,0 +1,32 @@
+[
+  {
+    "id": "azure-gpt-4o",
+    "name": "Azure OpenAI - GPT-4o",
+    "provider": "azure_openai",
+    "model": "gpt-4o",
+    "api_key_env": "AZURE_OPENAI_API_KEY",
+    "endpoint_env": "AZURE_OPENAI_ENDPOINT",
+    "api_version_env": "AZURE_OPENAI_API_VERSION",
+    "deployment_env": "AZURE_OPENAI_GPT_4O_DEPLOYMENT"
+  },
+  {
+    "id": "azure-gpt-4.1",
+    "name": "Azure OpenAI - GPT-4.1",
+    "provider": "azure_openai",
+    "model": "gpt-4.1",
+    "api_key_env": "AZURE_OPENAI_API_KEY",
+    "endpoint_env": "AZURE_OPENAI_ENDPOINT",
+    "api_version_env": "AZURE_OPENAI_API_VERSION",
+    "deployment_env": "AZURE_OPENAI_GPT_4_1_DEPLOYMENT"
+  },
+  {
+    "id": "azure-gpt-4.1-mini",
+    "name": "Azure OpenAI - GPT-4.1 mini",
+    "provider": "azure_openai",
+    "model": "gpt-4.1-mini",
+    "api_key_env": "AZURE_OPENAI_API_KEY",
+    "endpoint_env": "AZURE_OPENAI_ENDPOINT",
+    "api_version_env": "AZURE_OPENAI_API_VERSION",
+    "deployment_env": "AZURE_OPENAI_GPT_4_1_MINI_DEPLOYMENT"
+  }
+]

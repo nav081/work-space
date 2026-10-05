@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap');
+@import '@xyflow/react/dist/style.css';
+
+:root {
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+  color: #252c2a;
+  background: #f4f5f2;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --ink: #252c2a;
+  --muted: #818984;
+  --line: #e5e8e3;
+  --panel: #fff;
+  --canvas: #f6f7f4;
+  --green: #527f6c;
+  --green-light: #eaf2ed;
+  --mono: 'DM Mono', Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, input, textarea, select { font: inherit; }
+button { color: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid #79a891; outline-offset: 2px; }
+#root { min-height: 100vh; }
+::selection { background: #d8e8de; }
