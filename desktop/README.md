@@ -29,9 +29,13 @@ Open http://127.0.0.1:5173. Workflow configuration is saved in local browser sto
 
 ## Agent Tools
 
-Agents only receive tools enabled in their configuration. Project file reads, searches, and writes resolve paths inside the selected project directory. The optional command tool has an executable and subcommand allowlist, but builds and tests can run project-defined scripts. Only enable it for projects you trust; it is not an operating-system sandbox.
+Agents only receive tools enabled in their configuration. Project file reads, searches, and writes resolve paths inside the selected project directory. **Run commands** uses an executable and subcommand allowlist. The separate **Run any command** permission accepts any executable and arguments, without a shell, and runs it from the selected project directory. It is not an operating-system sandbox; enabled processes can still access files and services available to Threadline. Only enable it for projects you trust.
 
-The graph supports multiple roots, connected agent steps, and labeled reviewer branches. A reviewer routes to an edge labeled `changes requested`, `revise`, `reject`, or `feedback` when it responds with `[DECISION: REVISE]`; otherwise it follows an `approved`, `continue`, or `pass` edge. A review loop stops after five requested revisions.
+The Test engineer can use **Install dependencies** for Python, Node.js, and .NET projects. Python manifests install into the selected project's `.venv`; `pytest` then uses that interpreter. Node projects use npm/pnpm/yarn based on their lockfile (including React and Angular projects). .NET projects use `dotnet restore` against the selected solution or project. In monorepos, the agent can specify a manifest path relative to the project root. This permission is separate from **Run commands** and can be disabled per agent. Package install/build hooks may execute, so only enable it for projects you trust.
+
+Tester success is evidence-gated: every executed test command must exit successfully. After a Developer handoff, if Tester responds without issuing a new test command, Threadline automatically replays that Tester agent's previous command(s) in the same project environment before routing.
+
+The graph supports multiple roots, connected agent steps, and labeled reviewer branches. Every routed agent receives a handoff containing the source agent, connection label, decision, and full previous result; the same handoff is shown in the live console. A reviewer routes to an edge labeled `changes requested`, `revise`, `reject`, or `feedback` when it responds with `[DECISION: REVISE]`; otherwise it follows an `approved`, `continue`, or `pass` edge. A review loop stops after five requested revisions. Test engineer edges labeled `failed` or `error` return to Developer with the failure report; edges labeled `passed`, `success`, or `continue` proceed. For custom labels, a PASS follows an unambiguous normal outgoing wire, and a FAIL prefers a wire directed to Developer. Test retries stop after five failures.
 
 Run backend checks with:
 

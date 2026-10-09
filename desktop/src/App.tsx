@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type FormEvent } from 'react'
 import {
   addEdge, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider,
   useEdgesState, useNodesState, useReactFlow,
   type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react'
 import {
-  Activity, ArrowRight, Check, ChevronDown, CircleHelp, ClipboardList,
+  Activity, ArrowRight, Check, ChevronDown, CircleHelp, ClipboardList, Download,
   Code2, FileCode2, FileText, FlaskConical, GitBranch, Layers2, MessageSquareText,
-  MoreHorizontal, Plus, Search, Settings2, ShieldCheck, Sparkles, Terminal,
-  X, Zap,
+  FileUp, MoreHorizontal, Plus, Save, Search, Settings2, ShieldCheck, Sparkles, Terminal,
+  Trash2, X, Zap,
 } from 'lucide-react'
 import './App.css'
 
@@ -25,8 +25,12 @@ type AgentData = {
   status?: string
 }
 type ModelOption = { id: string; name: string; provider: string; model: string; deployment: string; endpoint: string; api_version: string; api_key_configured: boolean; configured: boolean }
-type ConsoleEntry = { id: number; time: string; agent: string; level: string; message: string }
+type ConsoleEntry = { id: number; time: string; agent: string; level: string; message: string; detail?: string }
 type ModelForm = { id?: string; name: string; model: string; deployment: string; endpoint: string; api_version: string; api_key: string }
+type WorkflowSnapshot = { nodes: Node<AgentData>[]; edges: Edge[]; projectPath: string; requirement: string }
+type RunSummary = { run_id: string; started_at: string; completed_at?: string | null; status: string; project_name: string; project_path: string; requirement: string; agent_count: number; agents: Array<{ id: string; name: string; kind: string }> }
+type PersistedRunEvent = { created_at: string; type: string; agent_id?: string; agent_name?: string; name?: string; message?: string; content?: string; detail?: string; tool?: string; target_name?: string; connection_label?: string; decision?: string }
+type RunDetail = RunSummary & { workflow: { agents: Array<{ id: string; name: string; kind: string; model: string; instruction: string; tools: string[] }>; edges: Array<{ source: string; target: string; label: string }> }; events: PersistedRunEvent[] }
 
 const emptyModelForm: ModelForm = { name: '', model: '', deployment: '', endpoint: '', api_version: '', api_key: '' }
 
@@ -34,7 +38,7 @@ const presets: Record<AgentKind, Omit<AgentData, 'status'>> = {
   understand: { kind: 'understand', name: 'Requirement analyst', detail: 'Clarifies scope and context', color: 'mint', instruction: 'Read the request and relevant project files. Produce an implementation brief with assumptions, acceptance criteria, and likely affected files or systems.', model: 'azure-gpt-4o', modelLabel: 'Azure GPT-4o', tools: ['Read files', 'Search codebase'] },
   developer: { kind: 'developer', name: 'Developer', detail: 'Implements the agreed changes', color: 'coral', instruction: 'Implement the assigned functionality in the selected project. Follow existing conventions, keep changes focused, and report changed files and validation performed.', model: 'azure-gpt-4o', modelLabel: 'Azure GPT-4o', tools: ['Read files', 'Edit files', 'Run commands'] },
   critic: { kind: 'critic', name: 'Code reviewer', detail: 'Reviews changes and routes fixes', color: 'blue', instruction: 'Review the implementation against requirements. Report actionable issues with file references and severity. Return to the developer when changes are needed; approve when clear.', model: 'azure-gpt-4o', modelLabel: 'Azure GPT-4o', tools: ['Read files', 'Search codebase'] },
-  tester: { kind: 'tester', name: 'Test engineer', detail: 'Verifies the completed behavior', color: 'yellow', instruction: 'Determine and run the most relevant tests for the changed functionality. Report exact commands, results, and missing coverage.', model: 'azure-gpt-4o', modelLabel: 'Azure GPT-4o', tools: ['Read files', 'Run commands'] },
+  tester: { kind: 'tester', name: 'Test engineer', detail: 'Verifies the completed behavior', color: 'yellow', instruction: 'Run the requested focused tests and report exact commands and results. If a test fails, identify the failure and route it to Developer. When Developer returns with a fix, rerun the failing test, then run the full relevant suite before reporting success.', model: 'azure-gpt-4o', modelLabel: 'Azure GPT-4o', tools: ['Read files', 'Run commands', 'Install dependencies'] },
   summary: { kind: 'summary', name: 'Release notes', detail: 'Summarizes the delivered work', color: 'lilac', instruction: 'Summarize what changed, why it changed, how it was validated, and useful next improvements. Ground the summary in run results.', model: 'azure-gpt-4o', modelLabel: 'Azure GPT-4o', tools: ['Read files'] },
 }
 
@@ -53,13 +57,14 @@ function loadWorkflow() {
   try {
     const saved = JSON.parse(localStorage.getItem(workflowStorageKey) ?? 'null')
     const savedNodes = Array.isArray(saved?.nodes) ? saved.nodes as Node<AgentData>[] : null
+    const migrateTesterDependencies = saved?.settingsVersion !== 2
     const oldStarterX = [60, 340, 620, 900, 1180]
     const isOriginalStarter = savedNodes?.length === starterNodes.length && savedNodes.every((node, index) => node.id === `a${index + 1}` && node.position.x === oldStarterX[index] && node.position.y === 120)
     const hasLegacyLabels = savedNodes?.every((node) => node.data.modelLabel?.toUpperCase().startsWith('AZURE GPT-'))
     const isLegacySingleRow = hasLegacyLabels && savedNodes?.every((node) => Math.abs(node.position.y - savedNodes[0].position.y) < 24)
     const shouldMigrateLayout = isOriginalStarter || isLegacySingleRow
     return {
-      nodes: savedNodes ? savedNodes.map((node, index) => { const migratedModel = legacyModelIds[node.data.model] ?? (node.data.modelLabel?.toUpperCase().startsWith('AZURE GPT-') ? 'azure-gpt-4o' : node.data.model); return { ...node, position: shouldMigrateLayout ? starterNodes[index].position : node.position, data: { ...node.data, model: migratedModel, modelLabel: migratedModel === 'azure-gpt-4o' ? 'Azure GPT-4o' : node.data.modelLabel, status: 'Ready' } } }) : starterNodes,
+      nodes: savedNodes ? savedNodes.map((node, index) => { const migratedModel = legacyModelIds[node.data.model] ?? (node.data.modelLabel?.toUpperCase().startsWith('AZURE GPT-') ? 'azure-gpt-4o' : node.data.model); const tools = node.data.kind === 'tester' && migrateTesterDependencies ? [...new Set([...node.data.tools, 'Install dependencies'])] : node.data.tools; return { ...node, position: shouldMigrateLayout ? starterNodes[index].position : node.position, data: { ...node.data, tools, model: migratedModel, modelLabel: migratedModel === 'azure-gpt-4o' ? 'Azure GPT-4o' : node.data.modelLabel, status: 'Ready' } } }) : starterNodes,
       edges: Array.isArray(saved?.edges) ? saved.edges as Edge[] : starterEdges,
       projectPath: typeof saved?.projectPath === 'string' ? saved.projectPath : '',
       requirement: typeof saved?.requirement === 'string' ? saved.requirement : '',
@@ -67,6 +72,31 @@ function loadWorkflow() {
   } catch {
     return { nodes: starterNodes, edges: starterEdges, projectPath: '', requirement: '' }
   }
+}
+
+function workflowSnapshot(snapshot: WorkflowSnapshot): WorkflowSnapshot {
+  return {
+    ...snapshot,
+    nodes: snapshot.nodes.map((node) => {
+      const savedNode = { ...node }
+      delete savedNode.selected
+      delete savedNode.dragging
+      delete savedNode.measured
+      delete savedNode.width
+      delete savedNode.height
+      delete savedNode.resizing
+      return { ...savedNode, data: { ...node.data, status: 'Ready' } }
+    }),
+    edges: snapshot.edges.map((edge) => {
+      const savedEdge = { ...edge }
+      delete savedEdge.selected
+      return { ...savedEdge, label: typeof edge.label === 'string' ? edge.label : '' }
+    }),
+  }
+}
+
+function workflowSignature(snapshot: WorkflowSnapshot): string {
+  return JSON.stringify(workflowSnapshot(snapshot))
 }
 
 const icons = { understand: MessageSquareText, developer: Code2, critic: ShieldCheck, tester: FlaskConical, summary: FileText }
@@ -100,7 +130,7 @@ function AgentNode({ data, selected }: NodeProps<Node<AgentData>>) {
 
 const nodeTypes = { agent: AgentNode }
 function WorkflowEditor() {
-  const [savedWorkflow] = useState(loadWorkflow)
+  const [savedWorkflow, setSavedWorkflow] = useState(loadWorkflow)
   const [nodes, setNodes, onNodesChange] = useNodesState(savedWorkflow.nodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(savedWorkflow.edges)
   const [selectedId, setSelectedId] = useState<string | null>('a2')
@@ -108,8 +138,15 @@ function WorkflowEditor() {
   const [projectName, setProjectName] = useState(savedWorkflow.projectPath ? savedWorkflow.projectPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || savedWorkflow.projectPath : 'No project selected')
   const [requirement, setRequirement] = useState(savedWorkflow.requirement)
   const [runState, setRunState] = useState<'idle' | 'running' | 'complete' | 'error'>('idle')
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null)
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([])
   const [activeTab, setActiveTab] = useState('Workflow')
+  const [runHistory, setRunHistory] = useState<RunSummary[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [runViewerOpen, setRunViewerOpen] = useState(false)
+  const [runViewerDetail, setRunViewerDetail] = useState<RunDetail | null>(null)
+  const [runViewerLoading, setRunViewerLoading] = useState(false)
   const [query, setQuery] = useState('')
   const [toast, setToast] = useState('')
   const [backendReady, setBackendReady] = useState(false)
@@ -119,11 +156,14 @@ function WorkflowEditor() {
   const [savingModel, setSavingModel] = useState(false)
   const { screenToFlowPosition } = useReactFlow()
   const consoleEndRef = useRef<HTMLDivElement>(null)
+  const importInputRef = useRef<HTMLInputElement>(null)
+  const consoleSequenceRef = useRef(0)
+  const agentSequenceRef = useRef(0)
   const selectedNode = nodes.find((node) => node.id === selectedId)
-
-  useEffect(() => {
-    localStorage.setItem(workflowStorageKey, JSON.stringify({ nodes, edges, projectPath, requirement }))
-  }, [nodes, edges, projectPath, requirement])
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
+  const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId)
+  const selectedEdgeSource = selectedEdge ? nodes.find((node) => node.id === selectedEdge.source) : undefined
+  const hasUnsavedChanges = workflowSignature({ nodes, edges, projectPath, requirement }) !== workflowSignature(savedWorkflow)
 
   useEffect(() => {
     consoleEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
@@ -140,11 +180,27 @@ function WorkflowEditor() {
     return () => { active = false }
   }, [])
 
-  const onConnect = useCallback((connection: Connection) => setEdges((current) => addEdge({ ...connection, animated: true }, current)), [setEdges])
+  useEffect(() => {
+    if (activeTab !== 'Runs') return
+    let active = true
+    fetch('/api/runs?limit=100').then(async (response) => {
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.detail ?? 'Could not load run history.')
+      if (active) { setRunHistory(result); setHistoryError('') }
+    }).catch((error) => { if (active) setHistoryError(error instanceof Error ? error.message : 'Could not load run history.') })
+      .finally(() => { if (active) setHistoryLoading(false) })
+    return () => { active = false }
+  }, [activeTab])
+
+  const onConnect = useCallback((connection: Connection) => {
+    setEdges((current) => addEdge({ ...connection, label: '', animated: true }, current))
+    setSelectedId(null)
+  }, [setEdges])
   const addAgent = useCallback((kind: AgentKind, position?: { x: number; y: number }) => {
-    const id = `agent-${Date.now()}`
+    const id = `agent-${Date.now()}-${++agentSequenceRef.current}`
     setNodes((current) => [...current, { id, type: 'agent', position: position ?? { x: 170 + current.length * 35, y: 310 + (current.length * 36) % 180 }, data: { ...presets[kind], status: 'Ready' } }])
     setSelectedId(id)
+    setSelectedEdgeId(null)
   }, [setNodes])
   const onDrop = useCallback((event: DragEvent) => {
     event.preventDefault()
@@ -154,9 +210,155 @@ function WorkflowEditor() {
   const updateSelected = (key: keyof AgentData, value: string | string[]) => {
     setNodes((current) => current.map((node) => node.id === selectedId ? { ...node, data: { ...node.data, [key]: value } } : node))
   }
-  const appendConsole = (message: string, agent = 'SYSTEM', level = 'info') => {
-    setConsoleEntries((current) => [...current, { id: Date.now() + Math.random(), time: new Date().toLocaleTimeString([], { hour12: false }), agent, level, message }].slice(-250))
+  const saveWorkflow = () => {
+    const snapshot = workflowSnapshot({ nodes, edges, projectPath, requirement })
+    localStorage.setItem(workflowStorageKey, JSON.stringify({ format: 'threadline.workflow', version: 1, settingsVersion: 2, ...snapshot }))
+    setSavedWorkflow(snapshot)
+    setNodes(snapshot.nodes)
+    setEdges(snapshot.edges)
+    setToast('Workflow saved. Agents will use this version.')
+    window.setTimeout(() => setToast(''), 2800)
   }
+  const discardWorkflowDraft = () => {
+    if (!hasUnsavedChanges || !window.confirm('Discard all unsaved workflow changes?')) return
+    setNodes(savedWorkflow.nodes)
+    setEdges(savedWorkflow.edges)
+    setProjectPath(savedWorkflow.projectPath)
+    setProjectName(savedWorkflow.projectPath ? savedWorkflow.projectPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || savedWorkflow.projectPath : 'No project selected')
+    setRequirement(savedWorkflow.requirement)
+    setSelectedId(null)
+    setSelectedEdgeId(null)
+    setToast('Unsaved changes discarded')
+    window.setTimeout(() => setToast(''), 2800)
+  }
+  const exportWorkflow = () => {
+    const snapshot = workflowSnapshot({ nodes, edges, projectPath, requirement })
+    const document = { format: 'threadline.workflow', version: 1, exportedAt: new Date().toISOString(), ...snapshot }
+    const blob = new Blob([JSON.stringify(document, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = window.document.createElement('a')
+    link.href = url
+    link.download = 'threadline-workflow.json'
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  const importWorkflow = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    if (!file) return
+    try {
+      if (hasUnsavedChanges && !window.confirm('Discard the current unsaved workflow draft and import this file?')) return
+      const document = JSON.parse(await file.text())
+      if (document.format !== 'threadline.workflow' || document.version !== 1 || !Array.isArray(document.nodes) || !Array.isArray(document.edges)) {
+        throw new Error('Choose a supported Threadline workflow JSON file.')
+      }
+      if (document.nodes.length > 100 || document.edges.length > 300) throw new Error('This workflow exceeds the supported size.')
+      const importedNodes: Node<AgentData>[] = document.nodes.map((node: Node<AgentData>) => {
+        const preset = node?.data && presets[node.data.kind]
+        if (!node || typeof node.id !== 'string' || !preset || !Number.isFinite(node.position?.x) || !Number.isFinite(node.position?.y)) {
+          throw new Error('Workflow contains an invalid agent.')
+        }
+        if (typeof node.data.name !== 'string' || typeof node.data.instruction !== 'string' || typeof node.data.model !== 'string' || !Array.isArray(node.data.tools)) {
+          throw new Error(`Agent ${node.id} is missing required configuration.`)
+        }
+        return {
+          id: node.id,
+          type: 'agent',
+          position: { x: node.position.x, y: node.position.y },
+          data: {
+            kind: node.data.kind,
+            name: node.data.name,
+            detail: typeof node.data.detail === 'string' ? node.data.detail : preset.detail,
+            color: preset.color,
+            instruction: node.data.instruction,
+            model: node.data.model,
+            modelLabel: typeof node.data.modelLabel === 'string' ? node.data.modelLabel : node.data.model,
+            tools: node.data.tools.filter((tool): tool is string => typeof tool === 'string'),
+            status: 'Ready',
+          },
+        }
+      })
+      const nodeIds = new Set(importedNodes.map((node) => node.id))
+      const importedEdges: Edge[] = document.edges.map((edge: Edge) => {
+        if (!edge || typeof edge.id !== 'string' || !nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
+          throw new Error('Workflow contains a connection to a missing agent.')
+        }
+        return {
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle,
+          type: edge.type,
+          animated: edge.animated,
+          label: typeof edge.label === 'string' ? edge.label : '',
+        }
+      })
+      const snapshot = workflowSnapshot({
+        nodes: importedNodes,
+        edges: importedEdges,
+        projectPath: typeof document.projectPath === 'string' ? document.projectPath : '',
+        requirement: typeof document.requirement === 'string' ? document.requirement : '',
+      })
+      setNodes(snapshot.nodes)
+      setEdges(snapshot.edges)
+      setProjectPath(snapshot.projectPath)
+      setProjectName(snapshot.projectPath ? snapshot.projectPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || snapshot.projectPath : 'No project selected')
+      setRequirement(snapshot.requirement)
+      setSelectedId(snapshot.nodes[0]?.id ?? null)
+      setSelectedEdgeId(null)
+      setToast('Workflow imported as a draft. Save it before running agents.')
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Could not import that workflow file.')
+    } finally {
+      input.value = ''
+      window.setTimeout(() => setToast(''), 4000)
+    }
+  }
+  const updateSelectedEdgeLabel = (label: string) => {
+    setEdges((current) => current.map((edge) => edge.id === selectedEdgeId ? { ...edge, label } : edge))
+  }
+  const deleteSelectedEdge = () => {
+    if (!selectedEdgeId) return
+    setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId))
+    setSelectedEdgeId(null)
+  }
+  const appendConsole = (message: string, agent = 'SYSTEM', level = 'info', detail?: string) => {
+    const id = ++consoleSequenceRef.current
+    setConsoleEntries((current) => [...current, { id, time: new Date().toLocaleTimeString([], { hour12: false }), agent, level, message, detail }])
+  }
+  const openCurrentRun = () => {
+    setRunViewerDetail(null)
+    setRunViewerOpen(true)
+  }
+  const openHistoricalRun = async (runId: string) => {
+    setRunViewerOpen(true)
+    setRunViewerLoading(true)
+    setRunViewerDetail(null)
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`)
+      const detail = await response.json()
+      if (!response.ok) throw new Error(detail.detail ?? 'Could not load this run.')
+      setRunViewerDetail(detail)
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : 'Could not load this run.')
+    } finally {
+      setRunViewerLoading(false)
+    }
+  }
+  const runViewerEvents: ConsoleEntry[] = runViewerDetail
+    ? runViewerDetail.events.map((event, index) => ({
+      id: index + 1,
+      time: new Date(event.created_at).toLocaleTimeString([], { hour12: false }),
+      agent: event.name ?? event.agent_name ?? 'SYSTEM',
+      level: event.type,
+      message: event.message ?? (event.type === 'agent_completed' ? 'Agent completed.' : event.type.replaceAll('_', ' ')),
+      detail: event.detail ?? event.content,
+    }))
+    : consoleEntries
+  const runViewerTitle = runViewerDetail
+    ? `${runViewerDetail.project_name} · ${new Date(runViewerDetail.started_at).toLocaleString()}`
+    : currentRunId ? `${projectName} · Live run` : 'No active run'
   const editModel = (model: ModelOption) => {
     setEditingModelId(model.id)
     setModelForm({ id: model.id, name: model.name, model: model.model, deployment: model.deployment, endpoint: model.endpoint, api_version: model.api_version, api_key: '' })
@@ -212,9 +414,11 @@ function WorkflowEditor() {
   }
   const runWorkflow = async () => {
     if (runState === 'running') return
+    if (hasUnsavedChanges) { setToast('Save workflow changes before running agents.'); window.setTimeout(() => setToast(''), 2800); return }
     if (!projectPath.trim()) { setToast('Connect a local project directory first'); window.setTimeout(() => setToast(''), 2600); return }
     if (!requirement.trim()) { setToast('Describe the functionality you want to build first'); window.setTimeout(() => setToast(''), 2600); return }
     setRunState('running')
+    setCurrentRunId(null)
     setConsoleEntries([])
     appendConsole(`Preparing ${nodes.length} agents for ${projectName}.`)
     setNodes((current) => current.map((node) => ({ ...node, data: { ...node.data, status: 'Pending' } })))
@@ -223,10 +427,10 @@ function WorkflowEditor() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          project_path: projectPath,
-          requirement,
-          agents: nodes.map(({ id, data }) => ({ id, kind: data.kind, name: data.name, detail: data.detail, instruction: data.instruction, model: data.model, tools: data.tools })),
-          edges: edges.map(({ id, source, target, label }) => ({ id, source, target, label: typeof label === 'string' ? label : '' })),
+          project_path: savedWorkflow.projectPath,
+          requirement: savedWorkflow.requirement,
+          agents: savedWorkflow.nodes.map(({ id, data }) => ({ id, kind: data.kind, name: data.name, detail: data.detail, instruction: data.instruction, model: data.model, tools: data.tools })),
+          edges: savedWorkflow.edges.map(({ id, source, target, label }) => ({ id, source, target, label: typeof label === 'string' ? label : '' })),
         }),
       })
       if (!response.ok) {
@@ -238,29 +442,36 @@ function WorkflowEditor() {
       const decoder = new TextDecoder()
       let buffer = ''
       let failed = false
-      const handleEvent = (event: { type: string; agent_id?: string; name?: string; content?: string; message?: string; phase?: string; tool?: string }) => {
-        if (event.type === 'agent_started' && event.agent_id) {
+      const handleEvent = (event: { type: string; run_id?: string; agent_id?: string; name?: string; content?: string; message?: string; detail?: string; phase?: string; tool?: string; target_name?: string; connection_label?: string; decision?: string }) => {
+        if (event.type === 'run_started') {
+          if (event.run_id) setCurrentRunId(event.run_id)
+          appendConsole(`Run ${event.run_id ?? ''} started for ${event.name ?? projectName}.`)
+        } else if (event.type === 'agent_started' && event.agent_id) {
           setNodes((current) => current.map((node) => node.id === event.agent_id ? { ...node, data: { ...node.data, status: 'Running' } } : node))
           appendConsole(`${event.name ?? 'Agent'} started.`, event.name ?? 'AGENT', 'start')
         } else if (event.type === 'agent_progress') {
-          appendConsole(event.message ?? 'Agent is working.', event.name ?? 'AGENT', event.phase ?? 'progress')
+          appendConsole(event.message ?? 'Agent is working.', event.name ?? 'AGENT', event.phase ?? 'progress', event.detail)
         } else if (event.type === 'tool_started') {
-          appendConsole(event.message ?? `Calling ${event.tool ?? 'tool'}.`, event.name ?? 'AGENT', 'tool')
+          appendConsole(event.message ?? `Calling ${event.tool ?? 'tool'}.`, event.name ?? 'AGENT', 'tool', event.detail)
         } else if (event.type === 'tool_completed') {
-          appendConsole(event.message ?? `${event.tool ?? 'Tool'} completed.`, event.name ?? 'AGENT', 'result')
+          appendConsole(event.message ?? `${event.tool ?? 'Tool'} completed.`, event.name ?? 'AGENT', 'result', event.detail)
+        } else if (event.type === 'handoff_routed') {
+          appendConsole(`${event.decision?.toUpperCase() ?? 'CONTINUE'} handoff to ${event.target_name ?? 'next agent'} via "${event.connection_label || 'default connection'}". ${event.message ?? ''}`, event.name ?? 'AGENT', 'handoff', event.detail)
         } else if (event.type === 'agent_completed' && event.agent_id) {
           setNodes((current) => current.map((node) => node.id === event.agent_id ? { ...node, data: { ...node.data, status: 'Complete' } } : node))
           const output = event.content ?? 'No text output returned.'
-          appendConsole(`Completed. Output: ${output.slice(0, 360)}${output.length > 360 ? '...' : ''}`, event.name ?? 'AGENT', 'complete')
+          appendConsole(`Completed with ${output.length} output characters.`, event.name ?? 'AGENT', 'complete', output)
         } else if (event.type === 'run_error') {
           failed = true
           setRunState('error')
           setNodes((current) => current.map((node) => ({ ...node, data: { ...node.data, status: node.data.status === 'Running' ? 'Failed' : node.data.status === 'Pending' ? 'Skipped' : node.data.status } })))
           appendConsole(event.message ?? 'The agent run failed.', 'ERROR', 'error')
+          fetch('/api/runs?limit=100').then((response) => response.json()).then((runs) => setRunHistory(runs)).catch(() => undefined)
         } else if (event.type === 'run_completed') {
           setRunState('complete')
           setNodes((current) => current.map((node) => node.data.status === 'Pending' ? { ...node, data: { ...node.data, status: 'Skipped' } } : node))
           appendConsole('Workflow execution completed.')
+          fetch('/api/runs?limit=100').then((response) => response.json()).then((runs) => setRunHistory(runs)).catch(() => undefined)
         }
       }
       while (true) {
@@ -297,7 +508,7 @@ function WorkflowEditor() {
       <div className="path-entry"><Terminal size={15} /><input aria-label="Local project path" placeholder="Enter local project path, e.g. D:\projects\my-app" value={projectPath} onChange={(event) => setProjectPath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') setProject() }} /><button className="path-save" onClick={setProject}>Set path <ArrowRight size={13} /></button></div>
       <div className="project-state"><span className={`state-indicator ${projectName !== 'No project selected' ? 'connected' : ''}`} />{projectName === 'No project selected' ? 'PATH NOT SET' : 'PATH SAVED'}</div>
     </div>
-    <div className="tabbar"><div className="tabs"><button className={activeTab === 'Workflow' ? 'active' : ''} onClick={() => setActiveTab('Workflow')}><GitBranch size={15} /> Workflow</button><button className={activeTab === 'Runs' ? 'active' : ''} onClick={() => setActiveTab('Runs')}><Activity size={15} /> Runs <span className="tab-count">0</span></button></div><div className="workflow-meta"><span><span className="meta-green" /> Draft</span><span className="meta-divider" /><span>{nodes.length} agents</span><button className="icon-button small" title="More workflow options"><MoreHorizontal size={17} /></button></div></div>
+    <div className="tabbar"><div className="tabs"><button className={activeTab === 'Workflow' ? 'active' : ''} onClick={() => setActiveTab('Workflow')}><GitBranch size={15} /> Workflow</button><button className={activeTab === 'Runs' ? 'active' : ''} onClick={() => { setHistoryLoading(true); setActiveTab('Runs') }}><Activity size={15} /> Runs <span className="tab-count">{runHistory.length}</span></button></div><div className="workflow-meta"><span><span className={hasUnsavedChanges ? 'meta-amber' : 'meta-green'} /> {hasUnsavedChanges ? 'Unsaved draft' : 'Saved'}</span><span className="meta-divider" /><span>{nodes.length} agents</span></div></div>
     <section className="requirement-bar"><span className="requirement-mark"><FileText size={16} /></span><div className="requirement-input"><span className="eyebrow">BUILD REQUEST</span><textarea aria-label="Describe the functionality to build" placeholder="Describe the functionality you want the agents to implement..." rows={2} value={requirement} onChange={(event) => setRequirement(event.target.value)} /></div><div className={`backend-badge ${backendReady ? 'online' : 'offline'}`}><span className="backend-dot" /><span>{backendReady ? 'AZURE OPENAI' : 'SERVICE OFFLINE'}</span><small>{backendReady ? `${models.filter((model) => model.configured).length} DEPLOYMENT(S) CONFIGURED` : 'START THE LANGGRAPH API'}</small></div></section>
 
     {activeTab === 'Settings' ? <main className="settings-view">
@@ -330,36 +541,43 @@ function WorkflowEditor() {
       </aside>
 
       <section className="canvas-column">
-        <div className="canvas-toolbar"><div className="canvas-title"><h2>Application workflow</h2><span className="draft-badge"><span /> DRAFT</span></div><div className="canvas-actions"><button className="secondary-button" onClick={() => { setNodes(starterNodes); setEdges(starterEdges); setSelectedId('a2') }}>Reset canvas</button><button className="run-button" onClick={runWorkflow} disabled={runState === 'running'}><Zap size={15} /> {runState === 'running' ? 'Running demo' : runState === 'complete' ? 'Run again' : 'Run workflow'} <span className="run-shortcut">Ctrl ↵</span></button></div></div>
+        <div className="canvas-toolbar"><div className="canvas-title"><h2>Application workflow</h2><span className={`draft-badge ${hasUnsavedChanges ? 'unsaved' : ''}`}><span /> {hasUnsavedChanges ? 'UNSAVED' : 'SAVED'}</span></div><div className="canvas-actions"><button className="secondary-button" title="Import workflow JSON" onClick={() => importInputRef.current?.click()}><FileUp size={14} /> Import</button><input ref={importInputRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importWorkflow} /><button className="secondary-button export-workflow-button" title="Export workflow JSON" onClick={exportWorkflow}><Download size={14} /> Export</button><button className="secondary-button" title="Delete selected connection" aria-label="Delete selected connection" onClick={deleteSelectedEdge} disabled={!selectedEdge}><Trash2 size={14} /></button>{hasUnsavedChanges && <button className="secondary-button discard-workflow-button" title="Discard unsaved changes" onClick={discardWorkflowDraft}><X size={14} /> Discard</button>}<button className="run-button save-workflow-button" onClick={saveWorkflow} disabled={!hasUnsavedChanges}><Save size={14} /> Save</button><button className="run-button" onClick={runWorkflow} disabled={runState === 'running' || hasUnsavedChanges} title={hasUnsavedChanges ? 'Save the draft before running agents' : 'Run the saved workflow'}><Zap size={15} /> {runState === 'running' ? 'Running' : runState === 'complete' ? 'Run again' : 'Run workflow'}</button></div></div>
         <div className="canvas-wrap" onDrop={onDrop} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }}>
           <div className="canvas-caption"><span>MAIN FLOW</span><span className="caption-rule" /><span>{nodes.length} STEPS · REVIEW LOOP</span></div>
-          <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_, node) => setSelectedId(node.id)} onPaneClick={() => setSelectedId(null)} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.12 }} minZoom={0.25} maxZoom={1.4}>
+          <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null) }} onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedId(null) }} onPaneClick={() => { setSelectedId(null); setSelectedEdgeId(null) }} nodeTypes={nodeTypes} deleteKeyCode={['Backspace', 'Delete']} fitView fitViewOptions={{ padding: 0.12 }} minZoom={0.25} maxZoom={1.4}>
             <Background color="#d8ddd8" gap={22} size={1} /><Controls position="bottom-left" showInteractive={false} /><MiniMap position="bottom-right" pannable zoomable nodeColor={(node) => ({ mint: '#77b9a0', coral: '#d9856e', blue: '#7197b9', yellow: '#c8a84d', lilac: '#a796c5' }[node.data.color as string] ?? '#aab2ac')} />
           </ReactFlow>
           {nodes.length === 0 && <div className="canvas-empty"><Layers2 size={23} /><strong>Start with an agent</strong><span>Drag one from the library to shape your workflow.</span></div>}
           <div className="canvas-bottom-note"><span className="keyboard-hint">SPACE</span> pan <span className="note-dot">·</span> scroll to zoom</div>
         </div>
-        <div className="canvas-statusbar"><span><span className="status-green" /> All changes saved</span><span className="statusbar-right"><GitBranch size={13} /> main <span className="meta-divider" /> Updated just now</span></div>
+        <div className="canvas-statusbar"><span><span className={hasUnsavedChanges ? 'status-amber' : 'status-green'} /> {hasUnsavedChanges ? 'Draft only · agents still use the saved workflow' : 'All changes saved'}</span><span className="statusbar-right"><GitBranch size={13} /> {edges.length} connections</span></div>
       </section>
 
       <aside className="inspector">
         <div className="inspector-tabs"><button className="selected"><Settings2 size={15} /> Configure</button><button><ClipboardList size={15} /> Context</button></div>
-        {selectedNode ? <>
+        {selectedEdge ? <>
+          <div className="inspector-title"><span className="connection-icon"><GitBranch size={16} /></span><div><span className="eyebrow">CONNECTION</span><strong>{nodes.find((node) => node.id === selectedEdge.source)?.data.name ?? selectedEdge.source} to {nodes.find((node) => node.id === selectedEdge.target)?.data.name ?? selectedEdge.target}</strong></div><button className="icon-button small" title="Close connection" onClick={() => setSelectedEdgeId(null)}><X size={16} /></button></div>
+          <div className="form-section"><label className="field-label" htmlFor="connection-label">Message on connection</label><input id="connection-label" className="text-input" value={typeof selectedEdge.label === 'string' ? selectedEdge.label : ''} onChange={(event) => updateSelectedEdgeLabel(event.target.value)} placeholder="Describe what this agent passes along" maxLength={120} /><span className="field-footnote">{selectedEdgeSource?.data.kind === 'tester' ? 'Use “failed” or “error” for a Developer retry and “passed” or “success” to continue. With custom labels, FAIL targets Developer; PASS targets the next non-Developer agent.' : 'This message is included in the saved workflow JSON and shown on the wire.'}</span></div>
+          <div className="inspector-bottom"><span><span className={hasUnsavedChanges ? 'status-amber' : 'status-green'} /> {hasUnsavedChanges ? 'Unsaved connection' : 'Saved connection'}</span><button className="delete-agent" onClick={deleteSelectedEdge}><Trash2 size={13} /> Remove connection</button></div>
+        </> : selectedNode ? <>
           <div className="inspector-title"><span className={`agent-icon ${selectedNode.data.color}`}><Settings2 size={16} /></span><div><span className="eyebrow">AGENT CONFIGURATION</span><strong>{selectedNode.data.name}</strong></div><button className="icon-button small" title="Close selection" onClick={() => setSelectedId(null)}><X size={16} /></button></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-name">Agent name</label><input id="agent-name" className="text-input" value={selectedNode.data.name} onChange={(event) => updateSelected('name', event.target.value)} /></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-kind">Role</label><div className="select-wrap"><select id="agent-kind" value={selectedNode.data.kind} onChange={(event) => { const preset = presets[event.target.value as AgentKind]; setNodes((current) => current.map((node) => node.id === selectedId ? { ...node, data: { ...preset, status: node.data.status } } : node)) }}>{Object.keys(presets).map((kind) => <option key={kind} value={kind}>{presets[kind as AgentKind].name}</option>)}</select><ChevronDown size={15} /></div></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-instructions">Instructions <span className="label-hint">PROMPT</span></label><textarea id="agent-instructions" className="instructions-input" value={selectedNode.data.instruction} onChange={(event) => updateSelected('instruction', event.target.value)} rows={7} /><span className="field-footnote">This agent receives upstream results and project context.</span></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-model">Azure deployment</label><div className="select-wrap"><select id="agent-model" value={selectedNode.data.model} onChange={(event) => { const model = models.find((item) => item.id === event.target.value); updateSelected('model', event.target.value); updateSelected('modelLabel', model?.name ?? event.target.value) }} disabled={!models.some((model) => model.configured)}><option value={selectedNode.data.model}>{models.find((model) => model.id === selectedNode.data.model)?.name ?? selectedNode.data.modelLabel}</option>{models.filter((model) => model.configured && model.id !== selectedNode.data.model).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select><ChevronDown size={15} /></div><span className="field-footnote">Set Azure key, endpoint, API version, and deployment in backend/.env.</span></div>
-          <div className="form-section tools-section"><div className="field-label">Tools <span className="label-hint">{selectedNode.data.tools.length} ENABLED</span></div><div className="tool-chips">{['Read files', 'Search codebase', 'Edit files', 'Run commands'].map((tool) => <button className={`tool-chip ${selectedNode.data.tools.includes(tool) ? 'enabled' : ''}`} key={tool} onClick={() => updateSelected('tools', selectedNode.data.tools.includes(tool) ? selectedNode.data.tools.filter((item) => item !== tool) : [...selectedNode.data.tools, tool])}><span className="tool-check">{selectedNode.data.tools.includes(tool) && <Check size={11} />}</span>{tool}</button>)}</div>{selectedNode.data.tools.includes('Run commands') && <span className="tool-warning">Commands run on this computer. Enable only for projects you trust.</span>}</div>
+          <div className="form-section tools-section"><div className="field-label">Tools <span className="label-hint">{selectedNode.data.tools.length} ENABLED</span></div><div className="tool-chips">{['Read files', 'Search codebase', 'Edit files', 'Run commands', 'Run any command', 'Install dependencies'].map((tool) => <button className={`tool-chip ${selectedNode.data.tools.includes(tool) ? 'enabled' : ''}`} key={tool} onClick={() => updateSelected('tools', selectedNode.data.tools.includes(tool) ? selectedNode.data.tools.filter((item) => item !== tool) : [...selectedNode.data.tools, tool])}><span className="tool-check">{selectedNode.data.tools.includes(tool) && <Check size={11} />}</span>{tool}</button>)}</div>{selectedNode.data.tools.includes('Run commands') && <span className="tool-warning">Commands run on this computer. Enable only for projects you trust.</span>}{selectedNode.data.tools.includes('Run any command') && <span className="tool-warning">Allows any executable and arguments to run locally from this project directory. Not an operating-system sandbox; enable only for trusted projects.</span>}{selectedNode.data.tools.includes('Install dependencies') && <span className="tool-warning">Installs Python, Node, or .NET dependencies from project manifests. Package build hooks may execute.</span>}</div>
           <div className="inspector-bottom"><span><span className="status-green" /> Config saved</span><button className="delete-agent" onClick={() => { setNodes((current) => current.filter((node) => node.id !== selectedId)); setEdges((current) => current.filter((edge) => edge.source !== selectedId && edge.target !== selectedId)); setSelectedId(null) }}><X size={13} /> Remove agent</button></div>
         </> : <div className="inspector-empty"><Settings2 size={22} /><strong>Select an agent</strong><span>Choose a canvas node to edit its role, instructions, model, and tools.</span></div>}
       </aside>
-    </main> : <main className="runs-view"><div className="runs-heading"><div><span className="eyebrow">EXECUTION HISTORY</span><h1>Runs</h1><p>Workflow runs and agent activity will appear here.</p></div><span className="runs-zero">0 RUNS</span></div><div className="runs-empty"><Activity size={24} /><strong>No workflow runs yet</strong><span>Start a run from the Workflow tab to see activity here.</span><button className="secondary-button" onClick={() => setActiveTab('Workflow')}>Go to workflow <ArrowRight size={14} /></button></div></main>}
+    </main> : activeTab === 'Runs' ? <main className="runs-view">
+      <div className="runs-heading"><div><span className="eyebrow">EXECUTION HISTORY</span><h1>Runs</h1><p>Open a run to inspect every agent, tool call, handoff, and result.</p></div><span className="runs-zero">{runHistory.length} RUNS</span></div>
+      {historyLoading ? <div className="runs-empty"><Activity size={22} /><strong>Loading run history</strong></div> : historyError ? <div className="runs-empty"><strong>Could not load runs</strong><span>{historyError}</span></div> : runHistory.length === 0 ? <div className="runs-empty"><Activity size={24} /><strong>No workflow runs yet</strong><span>Start a saved workflow to build run history.</span><button className="secondary-button" onClick={() => setActiveTab('Workflow')}>Go to workflow <ArrowRight size={14} /></button></div> : <div className="run-history-list">{runHistory.map((run) => <button className="run-history-row" key={run.run_id} onClick={() => openHistoricalRun(run.run_id)}><span className={`run-history-status ${run.status}`} /><span className="run-history-main"><strong>{run.project_name} <i /> {run.requirement || 'Workflow run'}</strong><small>{new Date(run.started_at).toLocaleString()} · {run.agent_count} agents · {run.status}</small></span><span className="run-history-agents">{run.agents.map((agent) => agent.name).join(' · ')}</span><ArrowRight size={15} /></button>)}</div>}
+    </main> : null}
 
     <section className="activity-drawer">
       <div className="activity-heading">
         <div className="activity-title"><span className={`activity-pulse ${runState === 'running' ? 'pulsing' : ''}`}><Activity size={15} /></span><strong>Execution monitor</strong><span className="activity-count">{nodes.length} agents</span></div>
-        <div className="activity-tools"><span className={`run-indicator ${runState}`}>{runState === 'running' ? 'RUNNING' : runState === 'complete' ? 'COMPLETED' : runState === 'error' ? 'ERROR' : 'IDLE'}</span></div>
+        <div className="activity-tools"><span className={`run-indicator ${runState}`}>{runState === 'running' ? 'RUNNING' : runState === 'complete' ? 'COMPLETED' : runState === 'error' ? 'ERROR' : 'IDLE'}</span><button className="secondary-button full-run-button" onClick={openCurrentRun} disabled={!currentRunId}><Activity size={13} /> View full run</button></div>
       </div>
       <div className="execution-console-grid">
         <section className="agent-status-panel" aria-label="Agent execution status">
@@ -372,6 +590,7 @@ function WorkflowEditor() {
         </section>
       </div>
     </section>
+    {runViewerOpen && <div className="run-viewer-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setRunViewerOpen(false) }}><section className="run-viewer" role="dialog" aria-modal="true" aria-label="Full run details"><header className="run-viewer-header"><div><span className="eyebrow">FULL INTERACTION LOG</span><h1>{runViewerTitle}</h1><p>{runViewerDetail ? `${runViewerDetail.agent_count} agents · ${runViewerDetail.events.length} events` : `${nodes.length} agents · ${runViewerEvents.length} live events`}</p></div><div className="run-viewer-actions"><span className={`run-status-pill ${runViewerDetail?.status ?? runState}`}>{runViewerDetail?.status ?? runState}</span><button className="icon-button" title="Close run details" aria-label="Close run details" onClick={() => setRunViewerOpen(false)}><X size={19} /></button></div></header><div className="run-viewer-content">{runViewerLoading ? <div className="runs-empty"><Activity size={22} /><strong>Loading full run</strong></div> : runViewerEvents.length === 0 ? <div className="runs-empty"><Activity size={22} /><strong>No interaction events yet</strong><span>Start a workflow to view prompts, tool output, agent reports, and routes here.</span></div> : <div className="run-detail-timeline">{runViewerEvents.map((entry) => <article className={`run-detail-event ${entry.level}`} key={entry.id}><header><time>{entry.time}</time><span className="run-detail-agent">{entry.agent}</span><span className="run-detail-type">{entry.level.replaceAll('_', ' ')}</span></header><p>{entry.message}</p>{entry.detail && <details><summary>View full interaction</summary><pre>{entry.detail}</pre></details>}</article>)}<div ref={consoleEndRef} /></div>}</div></section></div>}
     {toast && <div className="toast"><Check size={15} />{toast}</div>}
     <footer className="app-footer"><span>THREADLINE <span className="footer-separator">/</span> WORKFLOW BUILDER</span><span>LOCAL-FIRST AGENT ORCHESTRATION <span className="footer-separator">·</span> PROTOTYPE</span></footer>
   </div>

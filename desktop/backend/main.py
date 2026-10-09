@@ -6,15 +6,16 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI as FastAPIApplication, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from run_store import RunStore
 from settings_store import ModelSettingsInput, model_settings
-from workflow import RunRequest, build_workflow, missing_model_settings, resolve_project_path
+from workflow import RunRequest, WorkflowState, build_workflow, missing_model_settings, resolve_project_path
 
-app = FastAPI(title="Threadline Local Agent Service", version="0.1.0")
+app = FastAPIApplication(title="Threadline Local Agent Service", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost", "http://tauri.localhost"],
@@ -25,6 +26,9 @@ app.add_middleware(
 
 class ProjectRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2048)
+
+
+run_store = RunStore()
 
 
 def _event(payload: dict[str, Any]) -> str:
@@ -76,6 +80,19 @@ async def validate_project(request: ProjectRequest) -> dict[str, str]:
     return {"path": str(root), "name": root.name or str(root)}
 
 
+@app.get("/api/runs")
+async def list_runs(limit: int = 50) -> list[dict[str, Any]]:
+    return run_store.list_runs(limit)
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str) -> dict[str, Any]:
+    run = run_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return run
+
+
 @app.post("/api/workflows/run")
 async def run_workflow(request: RunRequest) -> StreamingResponse:
     try:
@@ -83,18 +100,23 @@ async def run_workflow(request: RunRequest) -> StreamingResponse:
     except (OSError, RuntimeError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
-    missing = missing_model_settings(request.agents)
+    try:
+        missing = missing_model_settings(request.agents)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     if missing:
         raise HTTPException(status_code=400, detail=f"Configure these Azure OpenAI settings in app Settings: {', '.join(missing)}")
+    run_id = run_store.create_run(root.name or str(root), str(root), request.requirement, request.model_dump(mode="json"))
 
     async def events() -> AsyncIterator[str]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        run_status = "running"
 
         async def execute() -> None:
             try:
                 graph = build_workflow(request, root, queue)
-                await queue.put({"type": "run_started", "project": root.name, "agent_count": len(request.agents)})
-                initial_state = {"requirement": request.requirement, "project_path": str(root), "messages": [], "decisions": {}, "review_counts": {}}
+                await queue.put({"type": "run_started", "run_id": run_id, "project": root.name, "agent_count": len(request.agents)})
+                initial_state: WorkflowState = {"requirement": request.requirement, "project_path": str(root), "messages": [], "decisions": {}, "review_counts": {}, "handoffs": {}, "test_commands": {}}
                 async for update in graph.astream(initial_state, config={"recursion_limit": 1000, "max_concurrency": 8}, stream_mode="updates"):
                     for agent_id, result in update.items():
                         messages = result.get("messages", []) if isinstance(result, dict) else []
@@ -114,10 +136,20 @@ async def run_workflow(request: RunRequest) -> StreamingResponse:
                 payload = await queue.get()
                 if payload["type"] == "stream_end":
                     break
+                if payload["type"] == "run_completed":
+                    run_status = "completed"
+                    run_store.finish_run(run_id, run_status)
+                elif payload["type"] == "run_error":
+                    run_status = "failed"
+                    run_store.finish_run(run_id, run_status)
+                run_store.append_event(run_id, payload)
                 yield _event(payload)
         finally:
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            if run_status == "running":
+                run_status = "interrupted"
+            run_store.finish_run(run_id, run_status)
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
