@@ -13,8 +13,9 @@ import main as api
 import workflow as workflow_module
 from settings_store import ModelSettingsInput, ModelSettingsStore
 from run_store import RunStore
+from threadline_backend.infrastructure import command_tools, dependency_tools
 
-from workflow import AgentConfig, EdgeConfig, RunRequest, WorkflowState, _project_tools, _review_targets, _test_targets, build_workflow, create_chat_model, get_model_api_key, missing_model_settings, required_model_settings, resolve_project_path, safe_project_file
+from workflow import AgentConfig, EdgeConfig, RunRequest, WorkflowState, _agent_result_decision, _project_tools, _review_targets, _routing_targets, _test_targets, build_workflow, create_chat_model, get_model_api_key, missing_model_settings, required_model_settings, resolve_project_path, safe_project_file
 
 
 def make_settings_store(tmp_path: Path) -> ModelSettingsStore:
@@ -55,12 +56,22 @@ def test_reviewer_routes_revision_and_approval() -> None:
     assert _review_targets(reviewer, links, approved_state) == ["tester"]
 
 
-def test_review_loop_stops_after_five_revisions() -> None:
+def test_review_loop_stops_after_configured_retry_limit() -> None:
     reviewer = make_agent("critic", "critic")
     links = [EdgeConfig(source="critic", target="developer", label="changes requested")]
 
-    with pytest.raises(RuntimeError, match="five-review safety limit"):
-        _review_targets(reviewer, links, make_state(decisions={"critic": "revise"}, review_counts={"critic": 5}))
+    assert _review_targets(reviewer, links, make_state(decisions={"critic": "revise"}, review_counts={"critic": 5})) == ["developer"]
+    with pytest.raises(RuntimeError, match=r"configured retry limit \(5\)"):
+        _review_targets(reviewer, links, make_state(decisions={"critic": "revise"}, review_counts={"critic": 6}))
+
+
+def test_agent_retry_limit_is_configurable() -> None:
+    reviewer = make_agent("critic", "critic").model_copy(update={"max_retries": 2})
+    links = [EdgeConfig(source="critic", target="developer", label="changes requested")]
+
+    assert _review_targets(reviewer, links, make_state(decisions={"critic": "revise"}, review_counts={"critic": 2})) == ["developer"]
+    with pytest.raises(RuntimeError, match=r"configured retry limit \(2\)"):
+        _review_targets(reviewer, links, make_state(decisions={"critic": "revise"}, review_counts={"critic": 3}))
 
 
 def test_tester_routes_failure_to_developer_and_pass_to_next() -> None:
@@ -99,9 +110,98 @@ def test_tester_stops_after_retry_limit_and_ends_on_unrouted_pass() -> None:
     tester = make_agent("tester", "tester")
     failure_edge = [EdgeConfig(source="tester", target="developer", label="Failed: return to developer")]
 
-    with pytest.raises(RuntimeError, match="five-test-retry safety limit"):
-        _test_targets(tester, failure_edge, make_state(decisions={"tester": "fail"}, review_counts={"tester": 5}))
+    assert _test_targets(tester, failure_edge, make_state(decisions={"tester": "fail"}, review_counts={"tester": 5})) == ["developer"]
+    with pytest.raises(RuntimeError, match=r"configured retry limit \(5\)"):
+        _test_targets(tester, failure_edge, make_state(decisions={"tester": "fail"}, review_counts={"tester": 6}))
     assert _test_targets(tester, failure_edge, make_state(decisions={"tester": "pass"}, review_counts={"tester": 1})) == "__end__"
+
+
+def test_configured_agent_outcomes_follow_only_the_selected_wire() -> None:
+    developer = make_agent("developer").model_copy(update={"success_edge_id": "dev-test", "failure_edge_id": "dev-retry"})
+    outgoing = [
+        EdgeConfig(id="dev-test", source="developer", target="tester", label="Run tests"),
+        EdgeConfig(id="dev-retry", source="developer", target="retry", label="Investigate failure"),
+    ]
+
+    assert _routing_targets(developer, outgoing, "pass", 0, {}) == ["tester"]
+    assert _routing_targets(developer, outgoing, "fail", 0, {}) == ["retry"]
+
+
+def test_configured_agent_retry_limit_controls_failure_wire() -> None:
+    developer = make_agent("developer").model_copy(update={"success_edge_id": "dev-test", "failure_edge_id": "dev-retry", "max_retries": 1})
+    outgoing = [
+        EdgeConfig(id="dev-test", source="developer", target="tester"),
+        EdgeConfig(id="dev-retry", source="developer", target="retry"),
+    ]
+
+    assert _routing_targets(developer, outgoing, "fail", 1, {}) == ["retry"]
+    with pytest.raises(RuntimeError, match=r"configured retry limit \(1\)"):
+        _routing_targets(developer, outgoing, "fail", 2, {})
+
+
+def test_agent_result_markers_and_failed_commands_select_failure() -> None:
+    assert _agent_result_decision("Changes complete. [AGENT_RESULT: SUCCESS]", False) == "pass"
+    assert _agent_result_decision("Could not complete. [AGENT_RESULT: FAILURE]", False) == "fail"
+    assert _agent_result_decision("Changes complete. [AGENT_RESULT: SUCCESS]", True) == "fail"
+    assert _agent_result_decision("No outcome marker", False) == "fail"
+
+
+def test_configured_generic_failure_loop_stops_after_five_failures() -> None:
+    developer = make_agent("developer").model_copy(update={"success_edge_id": "dev-test", "failure_edge_id": "dev-retry"})
+    outgoing = [
+        EdgeConfig(id="dev-test", source="developer", target="tester"),
+        EdgeConfig(id="dev-retry", source="developer", target="retry"),
+    ]
+
+    assert _routing_targets(developer, outgoing, "fail", 5, {}) == ["retry"]
+    with pytest.raises(RuntimeError, match=r"configured retry limit \(5\)"):
+        _routing_targets(developer, outgoing, "fail", 6, {})
+
+
+def test_compiled_graph_accepts_configured_developer_retry_routes(tmp_path: Path) -> None:
+    developer = make_agent("developer").model_copy(update={"success_edge_id": "dev-test", "failure_edge_id": "dev-retry"})
+    retry = make_agent("retry").model_copy(update={"success_edge_id": "retry-test", "failure_edge_id": "retry-dev"})
+    request = RunRequest(
+        project_path=str(tmp_path),
+        requirement="Implement and verify a change",
+        agents=[make_agent("analyst", "understand"), developer, retry, make_agent("tester", "tester")],
+        edges=[
+            EdgeConfig(id="analyst-dev", source="analyst", target="developer", label="Implementation brief"),
+            EdgeConfig(id="dev-test", source="developer", target="tester", label="Run tests"),
+            EdgeConfig(id="dev-retry", source="developer", target="retry", label="Investigate failure"),
+            EdgeConfig(id="retry-test", source="retry", target="tester", label="Retest after fix"),
+            EdgeConfig(id="retry-dev", source="retry", target="developer", label="Try another fix"),
+        ],
+    )
+
+    assert build_workflow(request, tmp_path, asyncio.Queue()) is not None
+
+
+def test_configured_outcome_wire_must_be_outgoing_from_its_agent(tmp_path: Path) -> None:
+    developer = make_agent("developer").model_copy(update={"success_edge_id": "not-connected"})
+    request = RunRequest(
+        project_path=str(tmp_path),
+        requirement="Implement a change",
+        agents=[developer, make_agent("tester", "tester")],
+        edges=[EdgeConfig(id="dev-test", source="developer", target="tester")],
+    )
+
+    with pytest.raises(ValueError, match="not connected from that agent"):
+        build_workflow(request, tmp_path, asyncio.Queue())
+
+
+def test_configured_tester_outcomes_follow_selected_wires_and_keep_retry_limit() -> None:
+    tester = make_agent("retry", "tester").model_copy(update={"success_edge_id": "retry-test", "failure_edge_id": "retry-dev"})
+    outgoing = [
+        EdgeConfig(id="retry-test", source="retry", target="tester", label="Retest"),
+        EdgeConfig(id="retry-dev", source="retry", target="developer", label="Fix again"),
+    ]
+
+    assert _routing_targets(tester, outgoing, "pass", 0, {}) == ["tester"]
+    assert _routing_targets(tester, outgoing, "fail", 1, {}) == ["developer"]
+    assert _routing_targets(tester, outgoing, "fail", 5, {}) == ["developer"]
+    with pytest.raises(RuntimeError, match=r"configured retry limit \(5\)"):
+        _routing_targets(tester, outgoing, "fail", 6, {})
 
 
 def test_compiled_graph_accepts_review_cycle(tmp_path: Path) -> None:
@@ -213,7 +313,7 @@ def test_graph_reruns_failed_test_after_developer_fix(tmp_path: Path, monkeypatc
             return subprocess.CompletedProcess(command, 1, stdout="ImportError: No module named PySide6", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="All focused and full-suite tests passed", stderr="")
 
-    monkeypatch.setattr(workflow_module.subprocess, "run", fake_pytest)
+    monkeypatch.setattr(command_tools.subprocess, "run", fake_pytest)
     request = RunRequest(
         project_path=str(tmp_path),
         requirement="Run a focused test, fix failures, then rerun the full suite",
@@ -318,7 +418,7 @@ def test_run_any_command_permission_allows_unlisted_executable(tmp_path: Path, m
         calls.append((command, cwd, shell))
         return subprocess.CompletedProcess(command, 0, stdout="Runner completed", stderr="")
 
-    monkeypatch.setattr(workflow_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(command_tools.subprocess, "run", fake_run)
     unrestricted_tool = next(tool for tool in _project_tools(tmp_path, {"Run any command"}) if tool.name == "run_any_project_command")
     restricted_tools = _project_tools(tmp_path, {"Run commands"})
 
@@ -341,7 +441,7 @@ def test_dependency_installer_uses_project_venv_and_allowed_manifest(tmp_path: P
             python_path.write_text("test interpreter", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="Dependencies installed", stderr="")
 
-    monkeypatch.setattr(workflow_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(dependency_tools.subprocess, "run", fake_run)
     installer = next(tool for tool in _project_tools(tmp_path, {"Install dependencies"}) if tool.name == "install_project_dependencies")
 
     result = installer.invoke({"manifest_name": "requirements.txt"})
@@ -367,8 +467,8 @@ def test_node_dependency_installer_uses_locked_npm_ci(tmp_path: Path, monkeypatc
     (tmp_path / "package.json").write_text('{"name":"sample-ui"}', encoding="utf-8")
     (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(workflow_module.shutil, "which", lambda name: f"C:/tools/{name}.cmd")
-    monkeypatch.setattr(workflow_module.subprocess, "run", lambda command, **kwargs: (calls.append((command, kwargs["cwd"])) or subprocess.CompletedProcess(command, 0, stdout="added packages", stderr="")))
+    monkeypatch.setattr(dependency_tools.shutil, "which", lambda name: f"C:/tools/{name}.cmd")
+    monkeypatch.setattr(dependency_tools.subprocess, "run", lambda command, **kwargs: (calls.append((command, kwargs["cwd"])) or subprocess.CompletedProcess(command, 0, stdout="added packages", stderr="")))
     installer = next(tool for tool in _project_tools(tmp_path, {"Install dependencies"}) if tool.name == "install_project_dependencies")
 
     result = installer.invoke({"ecosystem": "node"})
@@ -390,8 +490,8 @@ def test_node_installer_selects_lockfile_package_manager(tmp_path: Path, monkeyp
     (tmp_path / "package.json").write_text('{"name":"frontend"}', encoding="utf-8")
     (tmp_path / lockfile).write_text("lock", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(workflow_module.shutil, "which", lambda name: f"C:/tools/{name}.cmd")
-    monkeypatch.setattr(workflow_module.subprocess, "run", lambda command, **kwargs: (calls.append(command) or subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")))
+    monkeypatch.setattr(dependency_tools.shutil, "which", lambda name: f"C:/tools/{name}.cmd")
+    monkeypatch.setattr(dependency_tools.subprocess, "run", lambda command, **kwargs: (calls.append(command) or subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")))
     installer = next(tool for tool in _project_tools(tmp_path, {"Install dependencies"}) if tool.name == "install_project_dependencies")
 
     result = installer.invoke({"ecosystem": "node"})
@@ -408,8 +508,8 @@ def test_dotnet_dependency_installer_restores_selected_solution(tmp_path: Path, 
     solution = tmp_path / "App.sln"
     solution.write_text("solution", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(workflow_module.shutil, "which", lambda name: "C:/dotnet/dotnet.exe" if name == "dotnet" else None)
-    monkeypatch.setattr(workflow_module.subprocess, "run", lambda command, **kwargs: (calls.append((command, kwargs["cwd"])) or subprocess.CompletedProcess(command, 0, stdout="restore complete", stderr="")))
+    monkeypatch.setattr(dependency_tools.shutil, "which", lambda name: "C:/dotnet/dotnet.exe" if name == "dotnet" else None)
+    monkeypatch.setattr(dependency_tools.subprocess, "run", lambda command, **kwargs: (calls.append((command, kwargs["cwd"])) or subprocess.CompletedProcess(command, 0, stdout="restore complete", stderr="")))
     installer = next(tool for tool in _project_tools(tmp_path, {"Install dependencies"}) if tool.name == "install_project_dependencies")
 
     result = installer.invoke({"ecosystem": "dotnet", "manifest_name": "App.sln"})
@@ -421,8 +521,8 @@ def test_dotnet_dependency_installer_restores_selected_solution(tmp_path: Path, 
 def test_dotnet_installer_auto_discovers_single_project(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "Service.csproj").write_text("<Project />", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(workflow_module.shutil, "which", lambda name: "C:/dotnet/dotnet.exe" if name == "dotnet" else None)
-    monkeypatch.setattr(workflow_module.subprocess, "run", lambda command, **kwargs: (calls.append(command) or subprocess.CompletedProcess(command, 0, stdout="restored", stderr="")))
+    monkeypatch.setattr(dependency_tools.shutil, "which", lambda name: "C:/dotnet/dotnet.exe" if name == "dotnet" else None)
+    monkeypatch.setattr(dependency_tools.subprocess, "run", lambda command, **kwargs: (calls.append(command) or subprocess.CompletedProcess(command, 0, stdout="restored", stderr="")))
     installer = next(tool for tool in _project_tools(tmp_path, {"Install dependencies"}) if tool.name == "install_project_dependencies")
 
     result = installer.invoke({"ecosystem": "dotnet"})
@@ -441,7 +541,7 @@ def test_pytest_command_uses_project_virtualenv(tmp_path: Path, monkeypatch) -> 
         calls.append((command, cwd))
         return subprocess.CompletedProcess(command, 0, stdout="2 passed", stderr="")
 
-    monkeypatch.setattr(workflow_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(command_tools.subprocess, "run", fake_run)
     command_tool = next(tool for tool in _project_tools(tmp_path, {"Run commands"}) if tool.name == "run_project_command")
 
     result = command_tool.invoke({"arguments": ["pytest", "tests/test_gui.py", "-q"]})

@@ -8,25 +8,43 @@ from typing import Any
 from uuid import uuid4
 
 from platformdirs import user_data_path
+from threadline_backend.core.constants import (
+    DEFAULT_RUN_EVENT_TYPE,
+    DEFAULT_RUN_HISTORY_LIMIT,
+    FINAL_RUN_STATUSES,
+    MAX_RUN_HISTORY_LIMIT,
+    MIN_RUN_HISTORY_LIMIT,
+    RUN_DATABASE_FILENAME,
+    RUNNING_STATUS,
+    SQLITE_CONNECT_TIMEOUT_SECONDS,
+    TIMESTAMP_PRECISION,
+)
+from threadline_backend.presentation.run_serializers import serialize_run_detail, serialize_run_summary
 
 
 def _timestamp() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
+    """Return a UTC timestamp suitable for durable run events."""
+    return datetime.now(UTC).isoformat(timespec=TIMESTAMP_PRECISION)
 
 
 class RunStore:
+    """Persist workflow runs and their streamed event history in SQLite."""
+
     def __init__(self, database_path: Path | None = None):
-        self.database_path = database_path or user_data_path("Threadline", appauthor=False) / "runs.sqlite3"
+        """Initialize a run repository at the explicit or per-user database path."""
+        self.database_path = database_path or user_data_path("Threadline", appauthor=False) / RUN_DATABASE_FILENAME
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=15)
+        """Open a configured SQLite connection for one repository operation."""
+        connection = sqlite3.connect(self.database_path, timeout=SQLITE_CONNECT_TIMEOUT_SECONDS)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     def _initialize(self) -> None:
+        """Create run and event tables and their lookup indexes when needed."""
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -53,24 +71,27 @@ class RunStore:
             )
 
     def create_run(self, project_name: str, project_path: str, requirement: str, workflow: dict[str, Any]) -> str:
+        """Persist a new running workflow snapshot and return its identifier."""
         run_id = uuid4().hex
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO runs (run_id, started_at, status, project_name, project_path, requirement, workflow_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (run_id, _timestamp(), "running", project_name, project_path, requirement, json.dumps(workflow, ensure_ascii=True)),
+                (run_id, _timestamp(), RUNNING_STATUS, project_name, project_path, requirement, json.dumps(workflow, ensure_ascii=True)),
             )
         return run_id
 
     def append_event(self, run_id: str, payload: dict[str, Any]) -> None:
+        """Append one serialized event to a workflow run."""
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO run_events (run_id, created_at, event_type, payload_json) VALUES (?, ?, ?, ?)",
-                (run_id, _timestamp(), str(payload.get("type", "event")), json.dumps(payload, ensure_ascii=True)),
+                (run_id, _timestamp(), str(payload.get("type", DEFAULT_RUN_EVENT_TYPE)), json.dumps(payload, ensure_ascii=True)),
             )
 
     def finish_run(self, run_id: str, status: str) -> None:
-        if status not in {"completed", "failed", "interrupted"}:
+        """Set a run's terminal status and completion time."""
+        if status not in FINAL_RUN_STATUSES:
             raise ValueError("Invalid final run status.")
         with self._connect() as connection:
             connection.execute(
@@ -78,17 +99,19 @@ class RunStore:
                 (status, _timestamp(), run_id),
             )
 
-    def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
-        bounded_limit = min(max(limit, 1), 200)
+    def list_runs(self, limit: int = DEFAULT_RUN_HISTORY_LIMIT) -> list[dict[str, Any]]:
+        """Return recent run summaries within the supported result limit."""
+        bounded_limit = min(max(limit, MIN_RUN_HISTORY_LIMIT), MAX_RUN_HISTORY_LIMIT)
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT run_id, started_at, completed_at, status, project_name, project_path, requirement, workflow_json "
                 "FROM runs ORDER BY started_at DESC LIMIT ?",
                 (bounded_limit,),
             ).fetchall()
-        return [self._summary(row) for row in rows]
+        return [serialize_run_summary(row) for row in rows]
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
+        """Return a run snapshot and all events, or None when it does not exist."""
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
@@ -97,27 +120,4 @@ class RunStore:
                 "SELECT created_at, event_type, payload_json FROM run_events WHERE run_id = ? ORDER BY event_id",
                 (run_id,),
             ).fetchall()
-        return {
-            **self._summary(row),
-            "workflow": json.loads(row["workflow_json"]),
-            "events": [
-                {"created_at": event["created_at"], **json.loads(event["payload_json"])}
-                for event in events
-            ],
-        }
-
-    @staticmethod
-    def _summary(row: sqlite3.Row) -> dict[str, Any]:
-        workflow = json.loads(row["workflow_json"])
-        agents = workflow.get("agents", [])
-        return {
-            "run_id": row["run_id"],
-            "started_at": row["started_at"],
-            "completed_at": row["completed_at"],
-            "status": row["status"],
-            "project_name": row["project_name"],
-            "project_path": row["project_path"],
-            "requirement": row["requirement"],
-            "agent_count": len(agents),
-            "agents": [{"id": agent.get("id"), "name": agent.get("name"), "kind": agent.get("kind")} for agent in agents],
-        }
+        return serialize_run_detail(row, events)

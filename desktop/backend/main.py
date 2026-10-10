@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -13,45 +11,63 @@ from pydantic import BaseModel, Field
 
 from run_store import RunStore
 from settings_store import ModelSettingsInput, model_settings
-from workflow import RunRequest, WorkflowState, build_workflow, missing_model_settings, resolve_project_path
+from workflow import RunRequest, build_workflow, missing_model_settings, resolve_project_path
+from threadline_backend.application.workflow_run import WorkflowRunService
+from threadline_backend.core.constants import (
+    API_TITLE,
+    API_VERSION,
+    CORS_ALLOWED_HEADERS,
+    CORS_ALLOWED_METHODS,
+    CORS_ALLOWED_ORIGINS,
+    DEFAULT_RUN_HISTORY_LIMIT,
+    NO_CACHE_HEADER,
+    NO_CACHE_VALUE,
+    PROJECT_PATH_REQUEST_MAX_LENGTH,
+    PROXY_BUFFERING_DISABLED,
+    PROXY_BUFFERING_HEADER,
+    SSE_MEDIA_TYPE,
+)
+from threadline_backend.presentation.serializers import encode_sse_event
 
-app = FastAPIApplication(title="Threadline Local Agent Service", version="0.1.0")
+app = FastAPIApplication(title=API_TITLE, version=API_VERSION)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost", "http://tauri.localhost"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_methods=CORS_ALLOWED_METHODS,
+    allow_headers=CORS_ALLOWED_HEADERS,
 )
 
 
 class ProjectRequest(BaseModel):
-    path: str = Field(min_length=1, max_length=2048)
+    """Project directory path submitted by the desktop editor."""
+
+    path: str = Field(min_length=1, max_length=PROJECT_PATH_REQUEST_MAX_LENGTH)
 
 
 run_store = RunStore()
 
 
-def _event(payload: dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=True)}\n\n"
-
-
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
+    """Report local API readiness."""
     return {"status": "ok"}
 
 
 @app.get("/api/models")
 async def models() -> list[dict[str, Any]]:
+    """List configured model deployments for the desktop client."""
     return model_settings.list_models()
 
 
 @app.get("/api/settings/models")
 async def settings_models() -> list[dict[str, Any]]:
+    """List model settings for the Settings screen."""
     return model_settings.list_models()
 
 
 @app.post("/api/settings/models")
 async def save_model_settings(request: ModelSettingsInput) -> dict[str, Any]:
+    """Validate and persist model connection details and credentials."""
     try:
         return model_settings.save(request)
     except ValueError as error:
@@ -62,6 +78,7 @@ async def save_model_settings(request: ModelSettingsInput) -> dict[str, Any]:
 
 @app.delete("/api/settings/models/{model_id}")
 async def delete_model_settings(model_id: str) -> dict[str, str]:
+    """Delete a model configuration and its stored credential."""
     try:
         model_settings.delete(model_id)
     except ValueError as error:
@@ -73,6 +90,7 @@ async def delete_model_settings(model_id: str) -> dict[str, str]:
 
 @app.post("/api/projects/validate")
 async def validate_project(request: ProjectRequest) -> dict[str, str]:
+    """Resolve a project directory before saving it in the workflow editor."""
     try:
         root = resolve_project_path(request.path)
     except (OSError, RuntimeError, ValueError) as error:
@@ -81,12 +99,14 @@ async def validate_project(request: ProjectRequest) -> dict[str, str]:
 
 
 @app.get("/api/runs")
-async def list_runs(limit: int = 50) -> list[dict[str, Any]]:
+async def list_runs(limit: int = DEFAULT_RUN_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    """Return recent durable workflow summaries."""
     return run_store.list_runs(limit)
 
 
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str) -> dict[str, Any]:
+    """Return one durable run and its full event history."""
     run = run_store.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
@@ -95,6 +115,7 @@ async def get_run(run_id: str) -> dict[str, Any]:
 
 @app.post("/api/workflows/run")
 async def run_workflow(request: RunRequest) -> StreamingResponse:
+    """Validate a saved workflow and stream its persisted execution events."""
     try:
         root = resolve_project_path(request.project_path)
     except (OSError, RuntimeError, ValueError) as error:
@@ -107,49 +128,17 @@ async def run_workflow(request: RunRequest) -> StreamingResponse:
     if missing:
         raise HTTPException(status_code=400, detail=f"Configure these Azure OpenAI settings in app Settings: {', '.join(missing)}")
     run_id = run_store.create_run(root.name or str(root), str(root), request.requirement, request.model_dump(mode="json"))
+    service = WorkflowRunService(run_store, build_workflow)
+    events = _sse_events(service, request, root, run_id)
+    return StreamingResponse(events, media_type=SSE_MEDIA_TYPE, headers={NO_CACHE_HEADER: NO_CACHE_VALUE, PROXY_BUFFERING_HEADER: PROXY_BUFFERING_DISABLED})
 
-    async def events() -> AsyncIterator[str]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        run_status = "running"
 
-        async def execute() -> None:
-            try:
-                graph = build_workflow(request, root, queue)
-                await queue.put({"type": "run_started", "run_id": run_id, "project": root.name, "agent_count": len(request.agents)})
-                initial_state: WorkflowState = {"requirement": request.requirement, "project_path": str(root), "messages": [], "decisions": {}, "review_counts": {}, "handoffs": {}, "test_commands": {}}
-                async for update in graph.astream(initial_state, config={"recursion_limit": 1000, "max_concurrency": 8}, stream_mode="updates"):
-                    for agent_id, result in update.items():
-                        messages = result.get("messages", []) if isinstance(result, dict) else []
-                        for message in messages:
-                            await queue.put({"type": "agent_completed", **message})
-                await queue.put({"type": "run_completed"})
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                await queue.put({"type": "run_error", "message": str(error)[:1000]})
-            finally:
-                await queue.put({"type": "stream_end"})
-
-        task = asyncio.create_task(execute())
-        try:
-            while True:
-                payload = await queue.get()
-                if payload["type"] == "stream_end":
-                    break
-                if payload["type"] == "run_completed":
-                    run_status = "completed"
-                    run_store.finish_run(run_id, run_status)
-                elif payload["type"] == "run_error":
-                    run_status = "failed"
-                    run_store.finish_run(run_id, run_status)
-                run_store.append_event(run_id, payload)
-                yield _event(payload)
-        finally:
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            if run_status == "running":
-                run_status = "interrupted"
-            run_store.finish_run(run_id, run_status)
-
-    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+async def _sse_events(
+    service: WorkflowRunService,
+    request: RunRequest,
+    root: Path,
+    run_id: str,
+) -> AsyncIterator[str]:
+    """Adapt application event dictionaries to SSE frames."""
+    async for payload in service.stream_events(request, root, run_id):
+        yield encode_sse_event(payload)

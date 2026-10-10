@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type FormEvent } from 'react'
 import {
-  addEdge, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider,
+  addEdge, Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, ReactFlowProvider,
   useEdgesState, useNodesState, useReactFlow,
   type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react'
@@ -22,6 +22,9 @@ type AgentData = {
   model: string
   modelLabel: string
   tools: string[]
+  successEdgeId?: string
+  failureEdgeId?: string
+  maxRetries?: number
   status?: string
 }
 type ModelOption = { id: string; name: string; provider: string; model: string; deployment: string; endpoint: string; api_version: string; api_key_configured: boolean; configured: boolean }
@@ -43,6 +46,7 @@ const presets: Record<AgentKind, Omit<AgentData, 'status'>> = {
 }
 
 const workflowStorageKey = 'threadline.workflow.v1'
+const withArrowMarker = (edge: Edge): Edge => ({ ...edge, markerEnd: edge.markerEnd ?? { type: MarkerType.ArrowClosed } })
 const legacyModelIds: Record<string, string> = {
   'Claude 3.7 Sonnet': 'azure-gpt-4o',
   'claude-3-7-sonnet-latest': 'azure-gpt-4o',
@@ -65,12 +69,12 @@ function loadWorkflow() {
     const shouldMigrateLayout = isOriginalStarter || isLegacySingleRow
     return {
       nodes: savedNodes ? savedNodes.map((node, index) => { const migratedModel = legacyModelIds[node.data.model] ?? (node.data.modelLabel?.toUpperCase().startsWith('AZURE GPT-') ? 'azure-gpt-4o' : node.data.model); const tools = node.data.kind === 'tester' && migrateTesterDependencies ? [...new Set([...node.data.tools, 'Install dependencies'])] : node.data.tools; return { ...node, position: shouldMigrateLayout ? starterNodes[index].position : node.position, data: { ...node.data, tools, model: migratedModel, modelLabel: migratedModel === 'azure-gpt-4o' ? 'Azure GPT-4o' : node.data.modelLabel, status: 'Ready' } } }) : starterNodes,
-      edges: Array.isArray(saved?.edges) ? saved.edges as Edge[] : starterEdges,
+      edges: Array.isArray(saved?.edges) ? (saved.edges as Edge[]).map(withArrowMarker) : starterEdges.map(withArrowMarker),
       projectPath: typeof saved?.projectPath === 'string' ? saved.projectPath : '',
       requirement: typeof saved?.requirement === 'string' ? saved.requirement : '',
     }
   } catch {
-    return { nodes: starterNodes, edges: starterEdges, projectPath: '', requirement: '' }
+    return { nodes: starterNodes, edges: starterEdges.map(withArrowMarker), projectPath: '', requirement: '' }
   }
 }
 
@@ -162,7 +166,7 @@ function WorkflowEditor() {
   const selectedNode = nodes.find((node) => node.id === selectedId)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId)
-  const selectedEdgeSource = selectedEdge ? nodes.find((node) => node.id === selectedEdge.source) : undefined
+  const selectedNodeOutgoing = selectedNode ? edges.filter((edge) => edge.source === selectedNode.id) : []
   const hasUnsavedChanges = workflowSignature({ nodes, edges, projectPath, requirement }) !== workflowSignature(savedWorkflow)
 
   useEffect(() => {
@@ -193,7 +197,7 @@ function WorkflowEditor() {
   }, [activeTab])
 
   const onConnect = useCallback((connection: Connection) => {
-    setEdges((current) => addEdge({ ...connection, label: '', animated: true }, current))
+    setEdges((current) => addEdge({ ...connection, label: '', animated: true, markerEnd: { type: MarkerType.ArrowClosed } }, current))
     setSelectedId(null)
   }, [setEdges])
   const addAgent = useCallback((kind: AgentKind, position?: { x: number; y: number }) => {
@@ -209,6 +213,9 @@ function WorkflowEditor() {
   }, [addAgent, screenToFlowPosition])
   const updateSelected = (key: keyof AgentData, value: string | string[]) => {
     setNodes((current) => current.map((node) => node.id === selectedId ? { ...node, data: { ...node.data, [key]: value } } : node))
+  }
+  const updateSelectedMaxRetries = (value: number) => {
+    setNodes((current) => current.map((node) => node.id === selectedId ? { ...node, data: { ...node.data, maxRetries: value } } : node))
   }
   const saveWorkflow = () => {
     const snapshot = workflowSnapshot({ nodes, edges, projectPath, requirement })
@@ -274,6 +281,9 @@ function WorkflowEditor() {
             model: node.data.model,
             modelLabel: typeof node.data.modelLabel === 'string' ? node.data.modelLabel : node.data.model,
             tools: node.data.tools.filter((tool): tool is string => typeof tool === 'string'),
+            successEdgeId: typeof node.data.successEdgeId === 'string' ? node.data.successEdgeId : undefined,
+            failureEdgeId: typeof node.data.failureEdgeId === 'string' ? node.data.failureEdgeId : undefined,
+            maxRetries: typeof node.data.maxRetries === 'number' && Number.isInteger(node.data.maxRetries) && node.data.maxRetries >= 0 && node.data.maxRetries <= 20 ? node.data.maxRetries : 5,
             status: 'Ready',
           },
         }
@@ -291,6 +301,7 @@ function WorkflowEditor() {
           targetHandle: edge.targetHandle,
           type: edge.type,
           animated: edge.animated,
+          markerEnd: edge.markerEnd ?? { type: MarkerType.ArrowClosed },
           label: typeof edge.label === 'string' ? edge.label : '',
         }
       })
@@ -429,7 +440,7 @@ function WorkflowEditor() {
         body: JSON.stringify({
           project_path: savedWorkflow.projectPath,
           requirement: savedWorkflow.requirement,
-          agents: savedWorkflow.nodes.map(({ id, data }) => ({ id, kind: data.kind, name: data.name, detail: data.detail, instruction: data.instruction, model: data.model, tools: data.tools })),
+          agents: savedWorkflow.nodes.map(({ id, data }) => ({ id, kind: data.kind, name: data.name, detail: data.detail, instruction: data.instruction, model: data.model, tools: data.tools, success_edge_id: data.successEdgeId, failure_edge_id: data.failureEdgeId, max_retries: data.maxRetries ?? 5 })),
           edges: savedWorkflow.edges.map(({ id, source, target, label }) => ({ id, source, target, label: typeof label === 'string' ? label : '' })),
         }),
       })
@@ -544,7 +555,7 @@ function WorkflowEditor() {
         <div className="canvas-toolbar"><div className="canvas-title"><h2>Application workflow</h2><span className={`draft-badge ${hasUnsavedChanges ? 'unsaved' : ''}`}><span /> {hasUnsavedChanges ? 'UNSAVED' : 'SAVED'}</span></div><div className="canvas-actions"><button className="secondary-button" title="Import workflow JSON" onClick={() => importInputRef.current?.click()}><FileUp size={14} /> Import</button><input ref={importInputRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={importWorkflow} /><button className="secondary-button export-workflow-button" title="Export workflow JSON" onClick={exportWorkflow}><Download size={14} /> Export</button><button className="secondary-button" title="Delete selected connection" aria-label="Delete selected connection" onClick={deleteSelectedEdge} disabled={!selectedEdge}><Trash2 size={14} /></button>{hasUnsavedChanges && <button className="secondary-button discard-workflow-button" title="Discard unsaved changes" onClick={discardWorkflowDraft}><X size={14} /> Discard</button>}<button className="run-button save-workflow-button" onClick={saveWorkflow} disabled={!hasUnsavedChanges}><Save size={14} /> Save</button><button className="run-button" onClick={runWorkflow} disabled={runState === 'running' || hasUnsavedChanges} title={hasUnsavedChanges ? 'Save the draft before running agents' : 'Run the saved workflow'}><Zap size={15} /> {runState === 'running' ? 'Running' : runState === 'complete' ? 'Run again' : 'Run workflow'}</button></div></div>
         <div className="canvas-wrap" onDrop={onDrop} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }}>
           <div className="canvas-caption"><span>MAIN FLOW</span><span className="caption-rule" /><span>{nodes.length} STEPS · REVIEW LOOP</span></div>
-          <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null) }} onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedId(null) }} onPaneClick={() => { setSelectedId(null); setSelectedEdgeId(null) }} nodeTypes={nodeTypes} deleteKeyCode={['Backspace', 'Delete']} fitView fitViewOptions={{ padding: 0.12 }} minZoom={0.25} maxZoom={1.4}>
+          <ReactFlow nodes={nodes} edges={edges} defaultEdgeOptions={{ markerEnd: { type: MarkerType.ArrowClosed } }} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_, node) => { setSelectedId(node.id); setSelectedEdgeId(null) }} onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); setSelectedId(null) }} onPaneClick={() => { setSelectedId(null); setSelectedEdgeId(null) }} nodeTypes={nodeTypes} deleteKeyCode={['Backspace', 'Delete']} fitView fitViewOptions={{ padding: 0.12 }} minZoom={0.25} maxZoom={1.4}>
             <Background color="#d8ddd8" gap={22} size={1} /><Controls position="bottom-left" showInteractive={false} /><MiniMap position="bottom-right" pannable zoomable nodeColor={(node) => ({ mint: '#77b9a0', coral: '#d9856e', blue: '#7197b9', yellow: '#c8a84d', lilac: '#a796c5' }[node.data.color as string] ?? '#aab2ac')} />
           </ReactFlow>
           {nodes.length === 0 && <div className="canvas-empty"><Layers2 size={23} /><strong>Start with an agent</strong><span>Drag one from the library to shape your workflow.</span></div>}
@@ -557,12 +568,13 @@ function WorkflowEditor() {
         <div className="inspector-tabs"><button className="selected"><Settings2 size={15} /> Configure</button><button><ClipboardList size={15} /> Context</button></div>
         {selectedEdge ? <>
           <div className="inspector-title"><span className="connection-icon"><GitBranch size={16} /></span><div><span className="eyebrow">CONNECTION</span><strong>{nodes.find((node) => node.id === selectedEdge.source)?.data.name ?? selectedEdge.source} to {nodes.find((node) => node.id === selectedEdge.target)?.data.name ?? selectedEdge.target}</strong></div><button className="icon-button small" title="Close connection" onClick={() => setSelectedEdgeId(null)}><X size={16} /></button></div>
-          <div className="form-section"><label className="field-label" htmlFor="connection-label">Message on connection</label><input id="connection-label" className="text-input" value={typeof selectedEdge.label === 'string' ? selectedEdge.label : ''} onChange={(event) => updateSelectedEdgeLabel(event.target.value)} placeholder="Describe what this agent passes along" maxLength={120} /><span className="field-footnote">{selectedEdgeSource?.data.kind === 'tester' ? 'Use “failed” or “error” for a Developer retry and “passed” or “success” to continue. With custom labels, FAIL targets Developer; PASS targets the next non-Developer agent.' : 'This message is included in the saved workflow JSON and shown on the wire.'}</span></div>
+          <div className="form-section"><label className="field-label" htmlFor="connection-label">Message on connection</label><input id="connection-label" className="text-input" value={typeof selectedEdge.label === 'string' ? selectedEdge.label : ''} onChange={(event) => updateSelectedEdgeLabel(event.target.value)} placeholder="Describe what this agent passes along" maxLength={120} /><span className="field-footnote">This message is included in the saved workflow and passed to the target agent. Configure this wire as an agent's success or failure route in its settings.</span></div>
           <div className="inspector-bottom"><span><span className={hasUnsavedChanges ? 'status-amber' : 'status-green'} /> {hasUnsavedChanges ? 'Unsaved connection' : 'Saved connection'}</span><button className="delete-agent" onClick={deleteSelectedEdge}><Trash2 size={13} /> Remove connection</button></div>
         </> : selectedNode ? <>
           <div className="inspector-title"><span className={`agent-icon ${selectedNode.data.color}`}><Settings2 size={16} /></span><div><span className="eyebrow">AGENT CONFIGURATION</span><strong>{selectedNode.data.name}</strong></div><button className="icon-button small" title="Close selection" onClick={() => setSelectedId(null)}><X size={16} /></button></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-name">Agent name</label><input id="agent-name" className="text-input" value={selectedNode.data.name} onChange={(event) => updateSelected('name', event.target.value)} /></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-kind">Role</label><div className="select-wrap"><select id="agent-kind" value={selectedNode.data.kind} onChange={(event) => { const preset = presets[event.target.value as AgentKind]; setNodes((current) => current.map((node) => node.id === selectedId ? { ...node, data: { ...preset, status: node.data.status } } : node)) }}>{Object.keys(presets).map((kind) => <option key={kind} value={kind}>{presets[kind as AgentKind].name}</option>)}</select><ChevronDown size={15} /></div></div>
+          <div className="form-section"><div className="field-label">Outcome routing</div><label className="field-label" htmlFor="agent-success-wire">On success</label><div className="select-wrap"><select id="agent-success-wire" value={selectedNodeOutgoing.some((edge) => edge.id === selectedNode.data.successEdgeId) ? selectedNode.data.successEdgeId : ''} onChange={(event) => updateSelected('successEdgeId', event.target.value)}><option value="">Not configured</option>{selectedNodeOutgoing.map((edge) => <option key={edge.id} value={edge.id}>{nodes.find((node) => node.id === edge.target)?.data.name ?? edge.target}{typeof edge.label === 'string' && edge.label ? ` · ${edge.label}` : ''}</option>)}</select><ChevronDown size={15} /></div><label className="field-label" htmlFor="agent-failure-wire">On failure</label><div className="select-wrap"><select id="agent-failure-wire" value={selectedNodeOutgoing.some((edge) => edge.id === selectedNode.data.failureEdgeId) ? selectedNode.data.failureEdgeId : ''} onChange={(event) => updateSelected('failureEdgeId', event.target.value)}><option value="">Not configured</option>{selectedNodeOutgoing.map((edge) => <option key={edge.id} value={edge.id}>{nodes.find((node) => node.id === edge.target)?.data.name ?? edge.target}{typeof edge.label === 'string' && edge.label ? ` · ${edge.label}` : ''}</option>)}</select><ChevronDown size={15} /></div><label className="field-label" htmlFor="agent-max-retries">Maximum retries <span className="label-hint">0–20</span></label><input id="agent-max-retries" className="text-input" type="number" min={0} max={20} step={1} value={selectedNode.data.maxRetries ?? 5} onChange={(event) => { const parsed = Number.parseInt(event.target.value, 10); updateSelectedMaxRetries(Number.isFinite(parsed) ? Math.min(20, Math.max(0, parsed)) : 0) }} /><span className="field-footnote">Failure handoffs allowed before stopping. Set to 0 to stop on the first failure. The selected wire’s message is passed to its destination.</span></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-instructions">Instructions <span className="label-hint">PROMPT</span></label><textarea id="agent-instructions" className="instructions-input" value={selectedNode.data.instruction} onChange={(event) => updateSelected('instruction', event.target.value)} rows={7} /><span className="field-footnote">This agent receives upstream results and project context.</span></div>
           <div className="form-section"><label className="field-label" htmlFor="agent-model">Azure deployment</label><div className="select-wrap"><select id="agent-model" value={selectedNode.data.model} onChange={(event) => { const model = models.find((item) => item.id === event.target.value); updateSelected('model', event.target.value); updateSelected('modelLabel', model?.name ?? event.target.value) }} disabled={!models.some((model) => model.configured)}><option value={selectedNode.data.model}>{models.find((model) => model.id === selectedNode.data.model)?.name ?? selectedNode.data.modelLabel}</option>{models.filter((model) => model.configured && model.id !== selectedNode.data.model).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select><ChevronDown size={15} /></div><span className="field-footnote">Set Azure key, endpoint, API version, and deployment in backend/.env.</span></div>
           <div className="form-section tools-section"><div className="field-label">Tools <span className="label-hint">{selectedNode.data.tools.length} ENABLED</span></div><div className="tool-chips">{['Read files', 'Search codebase', 'Edit files', 'Run commands', 'Run any command', 'Install dependencies'].map((tool) => <button className={`tool-chip ${selectedNode.data.tools.includes(tool) ? 'enabled' : ''}`} key={tool} onClick={() => updateSelected('tools', selectedNode.data.tools.includes(tool) ? selectedNode.data.tools.filter((item) => item !== tool) : [...selectedNode.data.tools, tool])}><span className="tool-check">{selectedNode.data.tools.includes(tool) && <Check size={11} />}</span>{tool}</button>)}</div>{selectedNode.data.tools.includes('Run commands') && <span className="tool-warning">Commands run on this computer. Enable only for projects you trust.</span>}{selectedNode.data.tools.includes('Run any command') && <span className="tool-warning">Allows any executable and arguments to run locally from this project directory. Not an operating-system sandbox; enable only for trusted projects.</span>}{selectedNode.data.tools.includes('Install dependencies') && <span className="tool-warning">Installs Python, Node, or .NET dependencies from project manifests. Package build hooks may execute.</span>}</div>
